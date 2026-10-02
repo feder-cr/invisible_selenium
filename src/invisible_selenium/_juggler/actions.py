@@ -1094,11 +1094,15 @@ class Actions:
                     # original only requested the events, so the selection
                     # stayed and so did the text - `fill("")`, which is
                     # Selenium's `clear()`, left the field as it was. A real
-                    # Delete removes the selection and fires a trusted `input`
-                    # of its own; `change` still has to be requested, because
-                    # a field keeps focus and would only fire it on blur.
+                    # Delete removes the selection and fires the trusted
+                    # `InputEvent` a user's Delete gives. ⛔ AND NOTHING ELSE:
+                    # `change` belongs to the blur, where Firefox fires it
+                    # itself, and never on a contenteditable. A `change`
+                    # requested here came out while the field still had focus,
+                    # on a `<div>` that cannot fire one, and a second time
+                    # from Firefox when the field was left. Selenium's
+                    # `clear()` leaves the field, which is where it comes from.
                     self.keyboard.press("Delete")
-                    self._trusted_events(f, element, ["change"])
             else:
                 self._trusted_events(f, element, ["input", "change"])
             return result

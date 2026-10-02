@@ -7,7 +7,8 @@ unadapted code first - and passes on the adaptation:
      wrapper draws it and the engine sends one jump);
   2. a dialog opened by the action ends the wait for `Page.pointerLanded`
      (there, the wait runs its ten seconds);
-  3. `fill("")` deletes the selected text (there, the field keeps its value);
+  3. `fill("")` deletes the selected text, and leaves `change` to the blur
+     (there, the field keeps its value);
   4. `Connection.send` can be interrupted by the caller.
 """
 from __future__ import annotations
@@ -157,10 +158,14 @@ def test_a_dialog_opened_by_the_click_ends_the_landing_wait():
 
 
 def test_clearing_a_field_deletes_the_selected_text():
+    """The Delete is the whole of it. `change` used to be requested from the
+    engine as well, while the field still had focus: Firefox fired a second
+    one at the blur, and a contenteditable got one it can never fire.
+    `change` comes from the blur."""
     a = _actions()
     a.fill("#b", "", timeout=2.0)
     assert a.keyboard.pressed == ["Delete"]
-    assert ("change",) in a.inj.trusted
+    assert a.inj.trusted == []
 
 
 class _Pipe:
