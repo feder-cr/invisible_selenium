@@ -210,6 +210,43 @@ def test_send_keys_clear_and_keys(home):
     assert field.get_attribute("value") == ""
 
 
+def test_clear_fires_what_a_user_fires(home):
+    """`clear()` is a Delete on the selected text and then leaving the field,
+    and the page must see what a user doing that makes Firefox fire: the
+    `InputEvent` of a Delete, and `change` from the blur, once, with Firefox's
+    own shape (not cancelable, not composed) - never on a contenteditable,
+    which cannot fire one. The known-bad input is the engine-built `change`
+    this used to request while the field still had focus: cancelable and
+    composed, followed by Firefox's own at the blur, and one on a `<div>`."""
+    from invisible_selenium.webdriver.common.by import By
+    d = home
+    d.execute_script("""
+        const ce = document.createElement('div');
+        ce.id = 'ce'; ce.contentEditable = 'true'; ce.textContent = 'abc';
+        document.body.prepend(ce);
+        document.getElementById('name').value = 'abc';
+        window.seen = [];
+        for (const t of ['beforeinput', 'input', 'change', 'blur'])
+          document.addEventListener(t, e => seen.push([e.target.id, e.type,
+            e.constructor.name, e.inputType || '', e.isTrusted, e.cancelable,
+            e.composed]), true);""")
+    for target in ("name", "ce"):
+        d.execute_script("window.seen = []")
+        d.find_element(By.ID, target).clear()
+        delete = [target, "InputEvent", "deleteContentForward", True]
+        expected = [[target, "beforeinput"] + delete[1:] + [True, True],
+                    [target, "input"] + delete[1:] + [False, True]]
+        if target == "name":
+            expected.append([target, "change", "Event", "", True, False, False])
+        expected.append([target, "blur", "FocusEvent", "", True, False, True])
+        assert d.execute_script("return window.seen") == expected, target
+        assert d.execute_script(
+            "return document.activeElement.id") != target, "the field kept focus"
+    assert d.execute_script(
+        "return [document.getElementById('name').value,"
+        " document.getElementById('ce').textContent]") == ["", ""]
+
+
 def test_file_input_receives_the_path(home, tmp_path):
     from invisible_selenium.webdriver.common.by import By
     d = home

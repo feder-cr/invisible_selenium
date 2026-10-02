@@ -376,11 +376,20 @@ class WebElement:
         self._act("press", "Enter")
 
     def clear(self) -> None:
-        """Clears the text if it's a text entry element."""
+        """Clears the text if it's a text entry element.
+
+        ⛔ AND THEN LEAVES THE FIELD, because that is Selenium's contract (the
+        W3C clear runs the focusing steps, empties, and runs the unfocusing
+        steps) and because it is where `change` comes from. The emptying fires
+        the `input` a user's Delete gives; the blur is what makes Firefox fire
+        `change` itself, with its own shape, and not at all on a
+        contenteditable, which never fires one.
+        """
         try:
             self._act("fill", "")
         except exc.JavascriptException as e:
             raise exc.InvalidElementStateException(str(e)) from None
+        self._act("blur")
 
     def send_keys(self, *value: str) -> None:
         """Simulates typing into the element.

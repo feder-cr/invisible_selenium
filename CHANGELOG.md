@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`clear()` leaves the field, and `change` comes from Firefox, once.** It
+  deleted the text and then asked the engine for a `change` while the field
+  still had focus: cancelable and composed, followed by Firefox's own at the
+  next blur, and sent even to a contenteditable, which never fires one. Inside
+  a shadow root that request failed and `clear()` raised after emptying the
+  field. It now runs Selenium's unfocusing step after the Delete, so `change`
+  comes from the blur, as it does for a user.
+
 ## [0.1.0] - 2026-09-25
 
 First version: a replica of invisible_playwright 0.25.7 with Selenium's contract.
