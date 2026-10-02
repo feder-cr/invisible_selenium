@@ -10,6 +10,15 @@
   a shadow root that request failed and `clear()` raised after emptying the
   field. It now runs Selenium's unfocusing step after the Delete, so `change`
   comes from the blur, as it does for a user.
+- **On Linux, a headless session starts on its own virtual display.** The
+  display counted as ready as soon as its lockfile existed, which Xvfb writes
+  before it opens its sockets, so sessions started together could land on
+  each other's display and the browser failed with `cannot open display`.
+  The display is also no longer reachable over TCP.
+
+### Requires
+- `invisible-core` 34.32.0, which carries the display fix. Same engine
+  (firefox-34).
 
 ## [0.1.0] - 2026-09-25
 
