@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Values a user picks are committed by Firefox itself.** `Select`, a click
+  on an `<option>`, `send_keys` on a file input and `clear()` on a date or time
+  field hand the choice to the engine's native input commands
+  (`Page.selectOptions`, `Page.setUserInput`, `Page.setFileInputFiles`), which
+  take the same paths as the dropdown, the date box and the file picker. The
+  page gets `input` and `change` with the shape a user's pick gives, inside
+  shadow roots too, and nothing when the choice did not change. The command
+  this used to call, `Page.dispatchTrustedInputEvents`, is gone from the
+  engine, so this needs the engine that ships the new commands and lands with
+  the core pin that seals it.
+
 ## [0.1.1] - 2026-10-02
 
 ### Fixed
