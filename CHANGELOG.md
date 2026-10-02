@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-10-02
 
 ### Fixed
 - **`clear()` leaves the field, and `change` comes from Firefox, once.** It
