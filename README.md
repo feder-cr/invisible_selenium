@@ -15,7 +15,7 @@ Anti-bots ask two questions, and reCAPTCHA, hCaptcha and Cloudflare Turnstile sc
 **1. Is this a real browser?** Yes. It is Firefox, patched at the C++ source level.
 
 - The browser fingerprint is set inside the engine, not injected into the page: navigator, screen, GPU/WebGL, canvas, fonts, audio, WebRTC, timezone, network. Headless or headed, the same values either way.
-- No geckodriver and no Marionette, so nothing turns `navigator.webdriver` on, and no JS shim to read.
+- No geckodriver and no Marionette, so nothing turns `navigator.webdriver` on, and no JavaScript shim for a page to find.
 
 **2. Is a real person using it?** Yes. The actions are humanized in the driver.
 
@@ -59,7 +59,7 @@ print("seed =", driver.seed)   # log it to replay the run
 driver.quit()
 ```
 
-Every session gets a distinct fingerprint (GPU, audio, fonts, screen, ~200 fields). Selenium does not need to be installed, and should not be: this package is the Selenium API.
+Every session gets a distinct fingerprint (GPU, audio, fonts, screen, ~200 fields). Do not install Selenium alongside it: this package already implements its API.
 
 ### Options
 
@@ -74,7 +74,7 @@ driver = webdriver.Firefox(
 )
 ```
 
-Proxy schemes: `socks5`, `socks4`, `http`, `https`; DNS goes through the proxy. `FirefoxOptions` work as in Selenium, `-headless` included. The pinnable keys are the same as invisible_playwright's: **[pinning](https://github.com/feder-cr/invisible_playwright/blob/main/docs/pinning.md)**.
+Proxies can be `socks5`, `socks4`, `http` or `https`, and DNS goes through them too. `FirefoxOptions` work as they do in Selenium, `-headless` included. The fields you can pin are the same as in invisible_playwright: **[pinning](https://github.com/feder-cr/invisible_playwright/blob/main/docs/pinning.md)**.
 
 ## CLI
 
@@ -88,12 +88,14 @@ invisible-selenium version    # wrapper, core and engine versions
 ## Related projects
 
 - **[invisible_playwright](https://github.com/feder-cr/invisible_playwright)**: the same engine with Playwright's API, and **[the guides](https://github.com/feder-cr/invisible_playwright/blob/main/docs/guides.md)** on how detection works.
-- **[invisible_puppeteer](https://github.com/feder-cr/invisible_puppeteer)**: the same engine with pyppeteer's API.
+- **[invisible_puppeteer](https://github.com/feder-cr/invisible_puppeteer)**: the same engine with Puppeteer's API, in Python.
 - **[invisible_playwright_mcp](https://github.com/feder-cr/invisible_playwright_mcp)**: the same engine for AI agents, over MCP.
-- **[invisible_core](https://github.com/feder-cr/invisible_core)**: seed to fingerprint to Firefox preferences. This package pins it.
+- **[invisible_core](https://github.com/feder-cr/invisible_core)**: turns a seed into a fingerprint and the fingerprint into Firefox preferences. This package depends on an exact version of it.
 - **[firefox_antidetect_patch](https://github.com/feder-cr/firefox_antidetect_patch)**: the C++ patches that build the browser.
 
-Coming from **[selenium-stealth](https://github.com/diprajpatra/selenium-stealth)**: it patches the page from JavaScript, and its last commit is from December 2021. [What that means](https://github.com/feder-cr/invisible_playwright/blob/main/docs/selenium-stealth-unmaintained.md).
+**Switching from another tool?**
+
+- **[selenium-stealth](https://github.com/diprajpatra/selenium-stealth)**: it patches the page from JavaScript, and its last commit is from December 2021. [What that means](https://github.com/feder-cr/invisible_playwright/blob/main/docs/selenium-stealth-unmaintained.md).
 
 ## Development
 
