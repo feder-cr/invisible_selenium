@@ -22,8 +22,8 @@ import warnings
 from typing import Any, Dict, List, Optional
 
 from ... import _bridge
-from ..._juggler._profile import _domain_matches, _host_of
-from ..._juggler.lifecycle import NavigationError
+from invisible_core.juggler import domain_matches, host_of
+from invisible_core.juggler.lifecycle import NavigationError
 from ...common import exceptions as exc
 from ..common.by import By
 from ..common.timeouts import Timeouts
@@ -492,12 +492,12 @@ class WebDriver:
     # ── cookies ─────────────────────────────────────────────────────────────
     def _document_cookies(self) -> List[dict]:
         url = self.current_url
-        host = _host_of(url)
+        host = host_of(url)
         path = _path_of(url)
         secure = url.startswith("https:")
         out = []
         for c in self._engine_context.cookies():
-            if not _domain_matches(c.get("domain") or "", host):
+            if not domain_matches(c.get("domain") or "", host):
                 continue
             cpath = c.get("path") or "/"
             if not path.startswith(cpath):
@@ -531,9 +531,9 @@ class WebDriver:
         if not url.startswith(("http:", "https:")):
             raise exc.InvalidCookieDomainException(
                 "cookies can only be set on an http(s) document, not %s" % url)
-        host = _host_of(url)
+        host = host_of(url)
         domain = cookie_dict.get("domain") or host
-        if not _domain_matches(domain, host):
+        if not domain_matches(domain, host):
             raise exc.InvalidCookieDomainException(
                 "Cookie domain %r does not match the current document" % domain)
         cookie = {"name": str(cookie_dict["name"]),

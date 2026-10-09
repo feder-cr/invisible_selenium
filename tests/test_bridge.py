@@ -20,8 +20,9 @@ def test_locators_are_rewritten_the_way_seleniums_client_does():
 
 
 def test_every_key_constant_maps_to_a_layout_key_or_is_refused_by_name():
-    from invisible_selenium._juggler.keyboard import Keyboard
-    kb = Keyboard(connection=None, session="s")
+    from invisible_core.juggler.keyboard import Keyboard
+    from invisible_core.juggler._behaviour import PageActs
+    kb = Keyboard(connection=None, session="s", acts=PageActs(1))
     for attr in dir(Keys):
         if attr.startswith("_"):
             continue
@@ -116,8 +117,8 @@ def test_nested_elements_use_the_placeholder_rebuild():
 
 
 def test_engine_failures_become_seleniums_exceptions():
-    from invisible_selenium._juggler.connection import TargetClosedError
-    from invisible_selenium._juggler.injected import EvaluationError
+    from invisible_core.juggler.connection import TargetClosedError
+    from invisible_core.juggler.injected import EvaluationError
     assert isinstance(_bridge.translate(EvaluationError("x")),
                       exc.JavascriptException)
     assert isinstance(_bridge.translate(RuntimeError("Cannot find object with id = 3")),
