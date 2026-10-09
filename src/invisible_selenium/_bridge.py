@@ -18,8 +18,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._juggler.connection import ProtocolError, TargetClosedError
-from ._juggler.injected import UTILITY_WORLD, EvaluationError
+from invisible_core.juggler.connection import ProtocolError, TargetClosedError
+from invisible_core.juggler.injected import UTILITY_WORLD, EvaluationError
 from .common import exceptions as exc
 
 # ── locators ────────────────────────────────────────────────────────────────
@@ -381,7 +381,7 @@ class Marshal:
         if subtype == "null":
             return None
         if subtype == "node":
-            adopted = self.inj.adopt(self.frame_id, None, oid)
+            adopted = self.inj.adopt(self.frame_id, oid)
             if not adopted:
                 raise exc.StaleElementReferenceException(
                     "The script returned a node that could not be carried back")

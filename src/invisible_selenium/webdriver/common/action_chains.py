@@ -99,7 +99,7 @@ class ActionChains:
                 "(%s)" % (x, y, w, h))
         buttons = 0
         if self._held_button is not None:
-            from ..._juggler.keyboard import BUTTON_MASK
+            from invisible_core.juggler.keyboard import BUTTON_MASK
             buttons = BUTTON_MASK[self._held_button]
         actions.glide_to(x, y, buttons=buttons)
 

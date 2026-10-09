@@ -38,7 +38,7 @@ from .service import Service
 def _motion_available() -> bool:
     """Whether the session's path generator can run in this process."""
     try:
-        from ..._motion import CursorMotion  # noqa: F401
+        from invisible_core.juggler import CursorMotion  # noqa: F401
     except Exception:
         return False
     return True
