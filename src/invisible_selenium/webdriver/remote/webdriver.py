@@ -107,8 +107,6 @@ class WebDriver:
                     self._dialogs[page.target_id] = dict(params)
 
         page.on_event(on_event)
-        page.actions.dialog_opened = (
-            lambda page=page: self._pending_dialog(page) is not None)
         self._prepare_page(page)
 
     def _prepare_page(self, page) -> None:
