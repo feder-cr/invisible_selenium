@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ..remote.webdriver import _LOAD_STATE
+
 
 class Options:
     KEY = "moz:firefoxOptions"
@@ -16,8 +18,23 @@ class Options:
         self._arguments: List[str] = []
         self._preferences: Dict[str, Any] = {}
         self._binary_location: str = ""
-        self.page_load_strategy = "normal"
+        self._page_load_strategy = "normal"
         self.accept_insecure_certs = False
+
+    # ── the page load strategy ──────────────────────────────────────────────
+    @property
+    def page_load_strategy(self) -> str:
+        """When a navigation command returns: "normal" (`load`), "eager"
+        (`DOMContentLoaded`) or "none" (once it has started). Selenium refuses
+        any other value as it is assigned, with this ValueError."""
+        return self._page_load_strategy
+
+    @page_load_strategy.setter
+    def page_load_strategy(self, value: str) -> None:
+        if value not in _LOAD_STATE:
+            raise ValueError(
+                "Strategy can only be one of the following: normal, eager, none")
+        self._page_load_strategy = value
 
     # ── arguments ───────────────────────────────────────────────────────────
     @property

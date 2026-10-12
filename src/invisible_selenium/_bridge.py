@@ -19,7 +19,6 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from invisible_core.juggler.connection import ProtocolError, TargetClosedError
-from invisible_core.juggler.deadline import Deadline
 from invisible_core.juggler.injected import (
     UTILITY_WORLD, ContextDestroyed, EvaluationError)
 from .common import exceptions as exc
@@ -239,27 +238,6 @@ def type_keys(actions, text: str, *, sticky: bool) -> None:
 _STALE_MARKS = ("Cannot find object", "not connected", "notconnected",
                 "Node is detached", "can't access dead object",
                 "has been destroyed")
-
-
-def across_navigation(fn, *, timeout: Optional[float] = 30.0):
-    """Run a page-level read, again if a document change got in its way.
-
-    ⛔ A NAVIGATION THE PAGE STARTED ON ITS OWN - a submitted form, a clicked
-    link - replaces the frame's worlds, and a read aimed at the old one is
-    refused before it runs. That is not an answer about the page, it is the
-    page being between two documents, so the read is made again until the new
-    world answers. ⛔ AND IT READS THE TYPE: the core says it with
-    `ContextDestroyed`, from the one place that sends commands to a context;
-    until 0.3.5 this matched four spellings of the engine's text.
-    """
-    deadline = Deadline(timeout)
-    while True:
-        try:
-            return fn()
-        except ContextDestroyed:
-            if deadline.passed():
-                raise
-            time.sleep(0.05)
 
 
 def translate(error: BaseException) -> BaseException:

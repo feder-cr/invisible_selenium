@@ -18,6 +18,61 @@ from ... import _bridge
 from ...common import exceptions as exc
 from ...webdriver.common.by import By
 
+#: Marionette's `webdriverSendKeysToElement` up to the first key
+#: (interaction.sys.mjs): the element's container (an <option>'s <select>),
+#: scrolled into view when it is not (`dom.isInView`: the element is in the
+#: paint tree at the in-view centre of its first client rect;
+#: `dom.scrollIntoView`: block end, inline nearest), refused when it cannot take
+#: the focus (`isKeyboardInteractable`; <body> and the document element always
+#: can), focused only when it does not have the focus already, and then the
+#: caret moved to the end (`moveCaretToEnd`: a textarea or text input whose
+#: selection ends at 0, or a contenteditable). Answers "ok", or the element as
+#: Marionette prints it in the error.
+#: ⛔ ONE DEPARTURE: Marionette sets `pointer-events: auto` on the element
+#: for the in-view test and puts the style back, which a page sees as two
+#: attribute mutations. The test here reads the same paint tree without
+#: touching the element, so a `pointer-events: none` element counts as out of
+#: view - which only means it is scrolled to, as Marionette would scroll it.
+_KEYBOARD_FOCUS = """(el) => {
+  const doc = el.ownerDocument, win = doc.defaultView;
+  let c = el;
+  if (el.localName === 'option' || el.localName === 'optgroup') {
+    c = el.closest('select, datalist') || el;
+  }
+  const rects = c.getClientRects();
+  let inView = false;
+  if (rects.length) {
+    const r = rects[0];
+    const left = Math.max(0, Math.min(r.x, r.x + r.width));
+    const right = Math.min(win.innerWidth, Math.max(r.x, r.x + r.width));
+    const top = Math.max(0, Math.min(r.y, r.y + r.height));
+    const bottom = Math.min(win.innerHeight, Math.max(r.y, r.y + r.height));
+    const x = Math.floor((left + right) / 2), y = Math.floor((top + bottom) / 2);
+    inView = c.getRootNode().elementsFromPoint(x, y).includes(c);
+  }
+  if (!inView && c.scrollIntoView) {
+    c.scrollIntoView({behavior: 'instant', block: 'end', inline: 'nearest'});
+  }
+  if (c.localName === 'body' || c === doc.documentElement) return 'ok';
+  if (doc.activeElement !== c) {
+    c.focus();
+    if (doc.activeElement !== c) {
+      let idents = '';
+      for (const a of ['id', 'class', 'href', 'name', 'src', 'type']) {
+        if (el.hasAttribute(a)) idents += ' ' + a + '="' + el.getAttribute(a) + '"';
+      }
+      return '<' + el.localName + idents + '>';
+    }
+    const text = c.localName === 'textarea' || (c.localName === 'input' && c.type === 'text');
+    if (text) {
+      if (c.selectionEnd === 0) { const n = c.value.length; c.setSelectionRange(n, n); }
+    } else if (c.isContentEditable) {
+      win.getSelection().setPosition(c, c.childNodes.length);
+    }
+  }
+  return 'ok';
+}"""
+
 #: What the retry loop prints when an action on this element times out: the
 #: loop takes a selector for its message and never queries it once a node is
 #: given, so this is a label.
@@ -332,8 +387,11 @@ class WebElement:
             " return {multiple: s.multiple, index: el.index,"
             " selected: Array.from(s.options).filter(o => o.selected)"
             ".map(o => o.index)}; }")
+        frame = self._page.lifecycle.frame(self._frame_id)
+        previous = frame.navigation if frame is not None else None
         if info is None:
             self._act("click")
+            self._parent._await_click_navigation(self._page, self._frame_id, previous)
             return
         select = self._page.injected.call_raw(
             self._ctx, "(el) => el.closest('select')", [{"objectId": self._oid}])
@@ -349,6 +407,7 @@ class WebElement:
                 timeout=self._parent._action_timeout())
         except Exception as e:
             raise _bridge.translate(e) from None
+        self._parent._await_click_navigation(self._page, self._frame_id, previous)
 
     def submit(self) -> None:
         """Submits a form.
@@ -409,7 +468,15 @@ class WebElement:
                     raise exc.InvalidArgumentException("File not found: %s" % path)
             self._act("set_input_files", files)
             return
-        self._act("focus")
+        # ⛔ NOT THE ENGINE'S `focus`: that one is Playwright's, which puts
+        # the caret at the START of a field it focuses, so a pre-filled field
+        # got the text in front of its value. Selenium appends, and refuses an
+        # element that cannot take the keys instead of typing them wherever
+        # the focus happens to be (see `_KEYBOARD_FOCUS`).
+        said = self._call(_KEYBOARD_FOCUS)
+        if said != "ok":
+            raise exc.ElementNotInteractableException(
+                "Element %s is not reachable by keyboard" % said)
         try:
             _bridge.type_keys(self._page.actions, text, sticky=True)
         except exc.WebDriverException:

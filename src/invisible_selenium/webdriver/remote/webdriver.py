@@ -7,7 +7,7 @@ here: every method below calls the engine that invisible_playwright drives
 Firefox with, over the Juggler pipe, and only the CONTRACT - names, signatures,
 return values, exceptions - is Selenium's.
 
-The browser, its contexts and its pages are `invisible_selenium._juggler.browser`.
+The browser, its contexts and its pages are `invisible_core.juggler.instance`.
 This class owns the Selenium-shaped state on top of them: which window and
 which frame commands go to, the three timeouts, and the dialogs waiting for an
 answer.
@@ -23,12 +23,24 @@ from typing import Any, Dict, List, Optional
 
 from ... import _bridge
 from invisible_core.juggler import domain_matches, host_of
+from invisible_core.juggler.injected import ContextDestroyed
 from invisible_core.juggler.lifecycle import NavigationError, NavigationInterrupted
 from ...common import exceptions as exc
 from ..common.by import By
 from ..common.timeouts import Timeouts
 from .switch_to import SwitchTo
 from .webelement import WebElement
+
+
+#: The load state each page load strategy waits for; "none" waits for nothing.
+#: Selenium's three, as Marionette reads them (navigate.sys.mjs).
+_LOAD_STATE = {"normal": "load", "eager": "domcontentloaded", "none": None}
+
+#: How long after a click Marionette looks for the page to start unloading,
+#: and how long it then gives the unload (`navigate.sys.mjs`, the unload timer
+#: of `waitForNavigationCompleted`; `marionette.navigate-after-click.timeout`).
+_CLICK_UNLOAD_WINDOW = 0.05
+_CLICK_UNLOAD_TIMEOUT = 5.0
 
 
 class WebDriver:
@@ -39,6 +51,9 @@ class WebDriver:
     """
 
     _web_element_cls = WebElement
+    #: Selenium's page load strategy, a key of `_LOAD_STATE`: the constructor
+    #: takes it from `Options.page_load_strategy`, which refuses any other.
+    _page_load_strategy = "normal"
 
     def _attach(self, browser, context) -> None:
         self._browser = browser
@@ -56,7 +71,7 @@ class WebDriver:
                      "browserVersion": (browser.version or "").split("/")[-1],
                      "platformName": _platform_name(),
                      "acceptInsecureCerts": False,
-                     "pageLoadStrategy": "normal",
+                     "pageLoadStrategy": self._page_load_strategy,
                      "timeouts": self._timeouts._to_json(),
                      "unhandledPromptBehavior": "dismiss and notify"}
 
@@ -245,11 +260,14 @@ class WebDriver:
 
     # ── navigation ──────────────────────────────────────────────────────────
     def get(self, url: str) -> None:
-        """Loads a web page in the current window, and waits for `load`."""
+        """Loads a web page in the current window, and waits for the state of
+        the page load strategy: `load` (normal), `DOMContentLoaded` (eager),
+        or only for the navigation to start (none)."""
         self._check_alert()
         page = self._current_page()
         try:
-            page.lifecycle.goto(url, frame_id=page.main_frame_id, until="load",
+            page.lifecycle.goto(url, frame_id=page.main_frame_id,
+                                until=_LOAD_STATE[self._page_load_strategy],
                                 timeout=self._timeouts.page_load or 300)
         except NavigationInterrupted as e:
             # Another document took the page before ours committed - the
@@ -265,8 +283,50 @@ class WebDriver:
             raise _bridge.translate(e) from None
         self._frame = None
 
+    def _await_click_navigation(self, page, frame_id: str,
+                                previous: Optional[str]) -> None:
+        """What Marionette does after an element click: if the click starts to
+        unload the page, wait for the page it unloads into.
+
+        ⛔ UNTIL 0.3.6 A CLICK RETURNED AT ONCE, and the next line of a test -
+        `find_element` with no implicit wait, `title`, `current_url` - read the
+        page being left or one half loaded. Selenium's click waits (Marionette,
+        `clickElement` in driver.sys.mjs, `waitForNavigationCompleted` in
+        navigate.sys.mjs): 50 ms for the page to start unloading, then 5 s for
+        the unload, then the page load strategy's state within the page load
+        timeout. A click that unloads nothing (a button, a link with
+        `target=_blank`, a hash) waits for nothing, and neither does the
+        "none" strategy.
+        """
+        state = _LOAD_STATE.get(self._page_load_strategy)
+        if state is None:
+            return
+        life = page.lifecycle
+        navigation = life.wait_for_navigation_start(
+            frame_id, previous, timeout=_CLICK_UNLOAD_WINDOW)
+        if navigation is None:
+            return
+        limit = self._timeouts.page_load or 300
+        began = time.monotonic()
+        try:
+            life.wait_for_state(frame_id, "commit", navigation=navigation,
+                                timeout=_CLICK_UNLOAD_TIMEOUT)
+        except TimeoutError:
+            return  # it started, and did not unload: Marionette stops waiting
+        except NavigationInterrupted:
+            pass  # another document took its place: wait for that one below
+        except NavigationError as e:
+            raise exc.WebDriverException("Reached error page: %s" % e) from None
+        try:
+            life.wait_for_state(frame_id, state,
+                                timeout=max(0.0, limit - (time.monotonic() - began)))
+        except TimeoutError:
+            raise exc.TimeoutException(
+                "Navigation timed out after %d ms" % round(limit * 1000)) from None
+
     def _history(self, command: str) -> None:
-        """Back, forward, reload - and wait for the document to change.
+        """Back, forward, reload - and wait for the document to change, then
+        for the state of the page load strategy (none: for nothing more).
 
         ⛔ READ THE CURRENT NAVIGATION FIRST. History gives back no
         navigationId, so the only thing to anchor the wait on is that this one
@@ -291,9 +351,15 @@ class WebDriver:
         while True:
             frame = page.lifecycle.frame(frame_id)
             if frame is not None and frame.navigation != previous:
+                state = _LOAD_STATE[self._page_load_strategy]
+                if state is None:
+                    # Started: "none" waits for nothing more, not even for
+                    # the new document's world.
+                    self._frame = None
+                    return
                 try:
                     page.lifecycle.wait_for_state(
-                        frame_id, "load", navigation=frame.navigation,
+                        frame_id, state, navigation=frame.navigation,
                         timeout=max(0.05, deadline - time.monotonic()))
                 except TimeoutError as e:
                     raise exc.TimeoutException(str(e)) from None
@@ -350,10 +416,8 @@ class WebDriver:
 
     def _location(self, page) -> str:
         try:
-            return _bridge.across_navigation(
-                lambda: page.injected.evaluate(page.main_frame_id,
-                                               "location.href") or "",
-                timeout=10)
+            return page.injected.evaluate(page.main_frame_id, "location.href",
+                                          timeout=10) or ""
         except Exception:
             return ""
 
@@ -369,8 +433,7 @@ class WebDriver:
         self._check_alert()
         page = self._current_page()
         try:
-            return _bridge.across_navigation(
-                lambda: page.injected.title(page.main_frame_id) or "")
+            return page.injected.title(page.main_frame_id) or ""
         except Exception as e:
             raise _bridge.translate(e) from None
 
@@ -380,8 +443,7 @@ class WebDriver:
         self._check_alert()
         page = self._current_page()
         try:
-            return _bridge.across_navigation(
-                lambda: page.injected.content(self._frame_id()))
+            return page.injected.content(self._frame_id())
         except Exception as e:
             raise _bridge.translate(e) from None
 
@@ -404,8 +466,9 @@ class WebDriver:
         while True:
             try:
                 if root_oid is None:
-                    found = _bridge.across_navigation(
-                        lambda: _bridge.query(page, frame_id, None, by, str(value)))
+                    found = page.injected.in_current_world(
+                        lambda _: _bridge.query(page, frame_id, None, by, str(value)),
+                        timeout=30)
                 else:
                     found = _bridge.query(page, frame_id, root_oid, by, str(value))
             except exc.WebDriverException:
@@ -467,31 +530,53 @@ class WebDriver:
         frame_id = self._frame_id()
         if not isinstance(script, str):
             script = getattr(script, "script", None) or str(script)
-        marshal = _bridge.across_navigation(
-            lambda: _bridge.Marshal(self, page, frame_id))
-        try:
-            protocol_args, nested = marshal.arguments(args)
-            declaration = _bridge.script_declaration(script, nested,
-                                                     is_async=is_async)
-            timeout = self._timeouts.script or 30
+        timeout = self._timeouts.script or 30
+
+        def attempt(deadline):
+            # ⛔ A SCRIPT THE ENGINE REFUSED BECAUSE ITS DOCUMENT HAD GONE NEVER
+            # RAN, AND IT RUNS IN THE DOCUMENT THERE IS NOW: Marionette sends
+            # it to the frame's current window, whatever was there when the
+            # command began. Until 0.3.6 it raised a stale element, which with
+            # the "none" strategy was every script sent while a page loaded.
+            # A script carrying an element is not sent again: the element
+            # belonged to the document that went, and stale is the answer.
+            # One that ran is never sent again either, whatever happens after.
+            marshal = _bridge.Marshal(self, page, frame_id)
             try:
-                remote = page.injected.call_raw(marshal.ctx, declaration,
-                                                protocol_args,
-                                                timeout=timeout + 1)
-            except TimeoutError:
+                try:
+                    protocol_args, nested = marshal.arguments(args)
+                except ContextDestroyed as e:
+                    raise _bridge.translate(e) from None
+                declaration = _bridge.script_declaration(script, nested,
+                                                         is_async=is_async)
+                try:
+                    remote = page.injected.call_raw(
+                        marshal.ctx, declaration, protocol_args,
+                        timeout=deadline.left() + 1)
+                except ContextDestroyed as e:
+                    if any("objectId" in a for a in protocol_args):
+                        raise _bridge.translate(e) from None
+                    raise
+                try:
+                    return marshal.result(remote)
+                except ContextDestroyed as e:
+                    raise _bridge.translate(e) from None
+            finally:
+                marshal.release()
+
+        try:
+            return page.injected.in_current_world(attempt, timeout=timeout)
+        except TimeoutError:
+            raise exc.TimeoutException(
+                "Timed out after %s ms" % int(timeout * 1000)) from None
+        except exc.WebDriverException:
+            raise
+        except Exception as e:
+            error = _bridge.translate(e)
+            if isinstance(error, exc.TimeoutException):
                 raise exc.TimeoutException(
                     "Timed out after %s ms" % int(timeout * 1000)) from None
-            except exc.WebDriverException:
-                raise
-            except Exception as e:
-                error = _bridge.translate(e)
-                if isinstance(error, exc.TimeoutException):
-                    raise exc.TimeoutException(
-                        "Timed out after %s ms" % int(timeout * 1000)) from None
-                raise error from None
-            return marshal.result(remote)
-        finally:
-            marshal.release()
+            raise error from None
 
     # ── cookies ─────────────────────────────────────────────────────────────
     def _document_cookies(self) -> List[dict]:

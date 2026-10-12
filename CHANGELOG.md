@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-12
+
+The pin moves to invisible-core 41.37.0.
+
+### Fixed
+- **`send_keys` types where geckodriver types.** It put the caret at the start
+  of a field it focused, so a pre-filled field got the text in front of its
+  value; it now focuses only an element that does not have the focus and moves
+  the caret to the end, as Marionette does. An element that cannot take the
+  focus raises `ElementNotInteractableException` ("is not reachable by
+  keyboard") instead of the keys going wherever the focus was.
+- **A click that unloads the page waits for the new one**, as geckodriver's
+  does: 50 ms for the page to start unloading, 5 s for the unload, then the
+  page load strategy's state within the page load timeout. A click that
+  unloads nothing returns at once.
+- **The page load strategy is honoured.** `Options.page_load_strategy` was
+  ignored: every navigation waited for `load` and the capabilities said
+  "normal". `get`, `back`, `forward`, `refresh` and a click now wait for
+  `load` (normal), `DOMContentLoaded` (eager) or only for the navigation to
+  start (none), and an unknown strategy raises `ValueError` as it is assigned.
+- **A script sent while the page is between two documents runs in the new
+  one**, as geckodriver sends it to the frame's current window; it raised
+  `StaleElementReferenceException`, which with the "none" strategy was every
+  script sent while a page loaded. A script carrying an element still raises
+  it: the element belonged to the document that went.
+- **No time limit of the engine's own.** Making a context, opening a page,
+  closing one and applying a context option each had a fixed limit (30, 20 and
+  10 s) that Selenium does not have, so a loaded host failed where the original
+  waits. They now wait as long as the original does; the limits the API
+  declares stay.
+- **A browser that dies ends every wait at once.** A wait for an event - a
+  page's load state, its main frame, a navigation - had nothing to wake it when
+  the browser closed or crashed, so it ran to its timeout. It now raises at
+  once that the target closed.
+
 ## [0.3.5] - 2026-10-12
 
 The pin moves to invisible-core 41.36.0.

@@ -27,7 +27,7 @@ from invisible_core._fpforge import Profile, generate_profile
 from ... import _session
 from ..._engine import assert_wire_version, resolve_executable
 from ..._humanize import ENGINE_BINARY, resolve_cursor_engine
-from ..._juggler.browser import launch as launch_engine
+from invisible_core.juggler.instance import launch as launch_engine
 from ..._reaper import SessionToken, guard_for
 from ...common import exceptions as exc
 from ..remote.webdriver import WebDriver as RemoteWebDriver
@@ -100,6 +100,7 @@ class WebDriver(_session.CommonLaunch, RemoteWebDriver):
         extra_args = list(extra_args or [])
         extra_prefs = dict(extra_prefs or {})
         if options is not None:
+            self._page_load_strategy = options.page_load_strategy
             for arg in options.arguments:
                 if arg in ("-headless", "--headless"):
                     headless = True
@@ -188,12 +189,12 @@ class WebDriver(_session.CommonLaunch, RemoteWebDriver):
         assert_wire_version(browser)
         self._bind_process_tree()
 
-        options = self._default_context_options()
+        context_options = self._default_context_options()
         if self._profile_dir is not None:
             # The profile's own context: its cookies and storage persist.
-            context = browser.default_context(options)
+            context = browser.default_context(context_options)
         else:
-            context = browser.new_context(options)
+            context = browser.new_context(context_options)
         if self._prep_recaptcha:
             # The cookie list is the core's (persona_cookies, pure data);
             # handing it to the engine context is the only part kept here.
