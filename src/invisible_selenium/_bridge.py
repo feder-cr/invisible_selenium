@@ -19,7 +19,9 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from invisible_core.juggler.connection import ProtocolError, TargetClosedError
-from invisible_core.juggler.injected import UTILITY_WORLD, EvaluationError
+from invisible_core.juggler.deadline import Deadline
+from invisible_core.juggler.injected import (
+    UTILITY_WORLD, ContextDestroyed, EvaluationError)
 from .common import exceptions as exc
 
 # ── locators ────────────────────────────────────────────────────────────────
@@ -231,39 +233,33 @@ def type_keys(actions, text: str, *, sticky: bool) -> None:
 
 
 # ── errors ──────────────────────────────────────────────────────────────────
-#: The engine's words for "the document this handle lived in is gone". For a
-#: DRIVER read they mean "ask again, the new document is arriving"
-#: (`is_context_gone`); for an ELEMENT they mean the element is stale.
-_CONTEXT_GONE = ("Failed to find execution context", "Cannot find context",
-                 "execution context was destroyed", "Execution context was destroyed")
-
-_STALE_MARKS = _CONTEXT_GONE + ("Cannot find object",
-                "not connected", "notconnected", "Node is detached",
-                "can't access dead object", "has been destroyed")
+#: The engine's words for "this element is not there any more", when the
+#: document is still the same one. A document that went is not here: the core
+#: says that with a type, `ContextDestroyed`.
+_STALE_MARKS = ("Cannot find object", "not connected", "notconnected",
+                "Node is detached", "can't access dead object",
+                "has been destroyed")
 
 
-def is_context_gone(error: BaseException) -> bool:
-    text = str(error)
-    return any(mark in text for mark in _CONTEXT_GONE)
-
-
-def across_navigation(fn, *, timeout: float = 30.0):
+def across_navigation(fn, *, timeout: Optional[float] = 30.0):
     """Run a page-level read, again if a document change got in its way.
 
     ⛔ A NAVIGATION THE PAGE STARTED ON ITS OWN - a submitted form, a clicked
-    link - replaces the frame's worlds, and for a moment the registry still
-    names the old one: a read in that moment fails with "Failed to find
-    execution context". That is not an answer about the page, it is the page
-    being between two documents, so the read is repeated until the new world
-    answers.
+    link - replaces the frame's worlds, and a read aimed at the old one is
+    refused before it runs. That is not an answer about the page, it is the
+    page being between two documents, so the read is made again until the new
+    world answers. ⛔ AND IT READS THE TYPE: the core says it with
+    `ContextDestroyed`, from the one place that sends commands to a context;
+    until 0.3.5 this matched four spellings of the engine's text.
     """
-    deadline = time.monotonic() + timeout
+    deadline = Deadline(timeout)
     while True:
         try:
             return fn()
-        except Exception as e:
-            if not is_context_gone(e) or not poll(deadline, 0.05):
+        except ContextDestroyed:
+            if deadline.passed():
                 raise
+            time.sleep(0.05)
 
 
 def translate(error: BaseException) -> BaseException:
@@ -274,7 +270,8 @@ def translate(error: BaseException) -> BaseException:
     if isinstance(error, TargetClosedError):
         return exc.NoSuchWindowException(
             "Browsing context has been discarded: %s" % text)
-    if any(mark in text for mark in _STALE_MARKS):
+    if isinstance(error, ContextDestroyed) or \
+            any(mark in text for mark in _STALE_MARKS):
         return exc.StaleElementReferenceException(
             "The element reference is stale; either its node has been removed "
             "from the document or the document has changed: %s" % text)
