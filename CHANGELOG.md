@@ -14,6 +14,12 @@ The pin moves to invisible-core 41.36.0.
   type when it cannot (an element of the page that is gone).
 - **Frames follow the documents.** After a navigation that moved the page to
   another browser process, the old document's iframes stayed listed.
+- **A `get` the browser abandons answers at once.** Called while the previous
+  page's own redirect was in flight, `get` could lose to it: Firefox loads the
+  redirect and drops ours without a word, and the call waited for the whole
+  page-load timeout. It now raises a WebDriverException at once, `Navigation
+  to "X" is interrupted by another navigation to "Y"`, as Firefox's own
+  WebDriver fails it, and not as "Reached error page": nothing failed to load.
 
 ## [0.3.4] - 2026-10-11
 

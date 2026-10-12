@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from ... import _bridge
 from invisible_core.juggler import domain_matches, host_of
-from invisible_core.juggler.lifecycle import NavigationError
+from invisible_core.juggler.lifecycle import NavigationError, NavigationInterrupted
 from ...common import exceptions as exc
 from ..common.by import By
 from ..common.timeouts import Timeouts
@@ -251,6 +251,12 @@ class WebDriver:
         try:
             page.lifecycle.goto(url, frame_id=page.main_frame_id, until="load",
                                 timeout=self._timeouts.page_load or 300)
+        except NavigationInterrupted as e:
+            # Another document took the page before ours committed - the
+            # previous page's own redirect, say. Nothing failed to load, so
+            # not "Reached error page"; Firefox's own WebDriver fails it too
+            # ("A new navigation interrupted an unfinished navigation").
+            raise exc.WebDriverException(str(e)) from None
         except NavigationError as e:
             raise exc.WebDriverException("Reached error page: %s" % e) from None
         except TimeoutError as e:
