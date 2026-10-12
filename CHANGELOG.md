@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-10-12
+
+The pin moves to invisible-core 41.38.0.
+
+### Fixed
+- **A script is sent once, whatever happens to its document.** 0.3.6 sent
+  a script refused because its document had gone again into the document
+  there was now, but the refusal does not say whether the script ran: one
+  waiting on a promise when its page navigated is refused in the same words,
+  and ran twice. `execute_script` now returns `None` when the document goes
+  under the script, as Marionette does, and never sends it again; a script
+  carrying an element of that document still raises
+  `StaleElementReferenceException`.
+
 ## [0.3.6] - 2026-10-12
 
 The pin moves to invisible-core 41.37.0.

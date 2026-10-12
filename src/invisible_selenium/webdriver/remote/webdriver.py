@@ -531,41 +531,36 @@ class WebDriver:
         if not isinstance(script, str):
             script = getattr(script, "script", None) or str(script)
         timeout = self._timeouts.script or 30
-
-        def attempt(deadline):
-            # ⛔ A SCRIPT THE ENGINE REFUSED BECAUSE ITS DOCUMENT HAD GONE NEVER
-            # RAN, AND IT RUNS IN THE DOCUMENT THERE IS NOW: Marionette sends
-            # it to the frame's current window, whatever was there when the
-            # command began. Until 0.3.6 it raised a stale element, which with
-            # the "none" strategy was every script sent while a page loaded.
-            # A script carrying an element is not sent again: the element
-            # belonged to the document that went, and stale is the answer.
-            # One that ran is never sent again either, whatever happens after.
-            marshal = _bridge.Marshal(self, page, frame_id)
-            try:
-                try:
-                    protocol_args, nested = marshal.arguments(args)
-                except ContextDestroyed as e:
-                    raise _bridge.translate(e) from None
-                declaration = _bridge.script_declaration(script, nested,
-                                                         is_async=is_async)
-                try:
-                    remote = page.injected.call_raw(
-                        marshal.ctx, declaration, protocol_args,
-                        timeout=deadline.left() + 1)
-                except ContextDestroyed as e:
-                    if any("objectId" in a for a in protocol_args):
-                        raise _bridge.translate(e) from None
-                    raise
-                try:
-                    return marshal.result(remote)
-                except ContextDestroyed as e:
-                    raise _bridge.translate(e) from None
-            finally:
-                marshal.release()
-
+        # ⛔ A SCRIPT IS SENT ONCE, WHATEVER HAPPENS TO ITS DOCUMENT. A world
+        # that went under it does not say whether it ran: Juggler sends a
+        # message still waiting for its answer again to the document that
+        # replaces the one it went to, so a script waiting on a promise when
+        # its page navigated is refused by the new page in the same words as
+        # one that never ran. 0.3.6 sent it again into the new page, which ran
+        # it twice ([B285]). Marionette never sends `executeScript` again and
+        # answers null (`NO_RETRY_METHODS`, `MarionetteCommandsParent.sys.mjs`);
+        # so does this. A script carrying an element is stale: the element
+        # belonged to the document that went.
+        marshal = _bridge.Marshal(self, page, frame_id)
         try:
-            return page.injected.in_current_world(attempt, timeout=timeout)
+            try:
+                protocol_args, nested = marshal.arguments(args)
+            except ContextDestroyed as e:
+                raise _bridge.translate(e) from None
+            declaration = _bridge.script_declaration(script, nested,
+                                                     is_async=is_async)
+            try:
+                remote = page.injected.call_raw(marshal.ctx, declaration,
+                                                protocol_args,
+                                                timeout=timeout + 1)
+            except ContextDestroyed as e:
+                if any("objectId" in a for a in protocol_args):
+                    raise _bridge.translate(e) from None
+                return None
+            try:
+                return marshal.result(remote)
+            except ContextDestroyed:
+                return None  # it ran, and its document went before the answer
         except TimeoutError:
             raise exc.TimeoutException(
                 "Timed out after %s ms" % int(timeout * 1000)) from None
@@ -577,6 +572,8 @@ class WebDriver:
                 raise exc.TimeoutException(
                     "Timed out after %s ms" % int(timeout * 1000)) from None
             raise error from None
+        finally:
+            marshal.release()
 
     # ── cookies ─────────────────────────────────────────────────────────────
     def _document_cookies(self) -> List[dict]:
