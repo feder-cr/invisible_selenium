@@ -18,9 +18,9 @@ from invisible_selenium.webdriver import FirefoxOptions
 from invisible_selenium.webdriver.common.by import By
 
 #: How long the slow document makes the browser wait for its first byte.
-SLOW_DOCUMENT_S = 3.0
+SLOW_DOCUMENT_S = 6.0
 #: How long the late image holds `load` back after `DOMContentLoaded`.
-LATE_IMAGE_S = 2.0
+LATE_IMAGE_S = 4.0
 
 INDEX = b"""<!doctype html><html><head><title>index</title></head><body>
 <a id=slow href="/slow">to the slow page</a>
@@ -86,7 +86,7 @@ def none(firefox_binary):
     d.quit()
 
 
-def _wait_for(driver, script, expected, limit=15):
+def _wait_for(driver, script, expected, limit=20):
     deadline = time.monotonic() + limit
     while True:
         got = driver.execute_script(script)
