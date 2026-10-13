@@ -182,8 +182,13 @@ class ActionChains:
 
     # ── keyboard ────────────────────────────────────────────────────────────
     def _focus(self, element) -> None:
-        # Selenium clicks the element first; so does this, with the pointer.
-        element.click()
+        """Selenium's `key_down`, `key_up` and `send_keys_to_element` click the
+        element first with `self.click(element)`: a pointer move and a press,
+        with no check of the element. Not `WebElement.click`, whose checks are
+        Marionette's element click (until 0.3.7 it was, and a covered or
+        disabled element refused what Selenium sends anyway)."""
+        self._move_to(*self._center(element))
+        self._press(_LEFT)
 
     def key_down(self, value: str, element=None):
         """Presses a key without releasing it (for modifiers)."""

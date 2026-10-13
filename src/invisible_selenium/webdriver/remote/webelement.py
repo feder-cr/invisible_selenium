@@ -18,51 +18,83 @@ from ... import _bridge
 from ...common import exceptions as exc
 from ...webdriver.common.by import By
 
-#: Marionette's `webdriverSendKeysToElement` up to the first key
-#: (interaction.sys.mjs): the element's container (an <option>'s <select>),
-#: scrolled into view when it is not (`dom.isInView`: the element is in the
-#: paint tree at the in-view centre of its first client rect;
-#: `dom.scrollIntoView`: block end, inline nearest), refused when it cannot take
-#: the focus (`isKeyboardInteractable`; <body> and the document element always
-#: can), focused only when it does not have the focus already, and then the
-#: caret moved to the end (`moveCaretToEnd`: a textarea or text input whose
-#: selection ends at 0, or a contenteditable). Answers "ok", or the element as
-#: Marionette prints it in the error.
-#: ⛔ ONE DEPARTURE: Marionette sets `pointer-events: auto` on the element
-#: for the in-view test and puts the style back, which a page sees as two
-#: attribute mutations. The test here reads the same paint tree without
-#: touching the element, so a `pointer-events: none` element counts as out of
-#: view - which only means it is scrolled to, as Marionette would scroll it.
-_KEYBOARD_FOCUS = """(el) => {
+#: Marionette's `dom` helpers this module needs, ONCE (remote/shared/DOM.sys.mjs
+#: and Format.sys.mjs), as a preamble the checks below run inside: `pp` prints
+#: an element as Marionette's errors print it (`pprint`); `container` is an
+#: <option>'s or <optgroup>'s <select> or <datalist> (`dom.getContainer`);
+#: `centre` is the in-view centre of a client rect (`dom.getInViewCentrePoint`);
+#: `paintTree` is the elements at that centre of the first client rect
+#: (`dom.getPointerInteractablePaintTree`); `inView` is whether the element is
+#: in it (`dom.isInView`, with its <tr> case); `scrollIntoView` is block end,
+#: inline nearest (`dom.scrollIntoView`).
+#: ⛔ ONE DEPARTURE: Marionette sets `pointer-events: auto` on the element for
+#: the in-view test and puts the style back, which a page sees as two attribute
+#: mutations. Here an element with `pointer-events: none` counts as in view
+#: when its in-view centre lies inside its own box, which is what the paint
+#: tree says of it with the style overridden, short of a clip by an ancestor.
+_DOM = """
   const doc = el.ownerDocument, win = doc.defaultView;
-  let c = el;
-  if (el.localName === 'option' || el.localName === 'optgroup') {
-    c = el.closest('select, datalist') || el;
-  }
-  const rects = c.getClientRects();
-  let inView = false;
-  if (rects.length) {
-    const r = rects[0];
+  const pp = (e) => {
+    if (!e) return 'null';
+    let idents = '';
+    for (const a of ['id', 'class', 'href', 'name', 'src', 'type']) {
+      if (e.hasAttribute(a)) idents += ' ' + a + '="' + e.getAttribute(a) + '"';
+    }
+    return '<' + e.localName + idents + '>';
+  };
+  const container = (e) => (e.localName === 'option' || e.localName === 'optgroup')
+      ? (e.closest('datalist, select') || e) : e;
+  const centre = (r) => {
     const left = Math.max(0, Math.min(r.x, r.x + r.width));
     const right = Math.min(win.innerWidth, Math.max(r.x, r.x + r.width));
     const top = Math.max(0, Math.min(r.y, r.y + r.height));
     const bottom = Math.min(win.innerHeight, Math.max(r.y, r.y + r.height));
-    const x = Math.floor((left + right) / 2), y = Math.floor((top + bottom) / 2);
-    inView = c.getRootNode().elementsFromPoint(x, y).includes(c);
-  }
-  if (!inView && c.scrollIntoView) {
-    c.scrollIntoView({behavior: 'instant', block: 'end', inline: 'nearest'});
-  }
+    return {x: Math.floor((left + right) / 2), y: Math.floor((top + bottom) / 2)};
+  };
+  const paintTree = (e) => {
+    if (!e.isConnected) return [];
+    const rects = e.getClientRects();
+    if (!rects.length) return [];
+    const p = centre(rects[0]);
+    return e.getRootNode().elementsFromPoint(p.x, p.y);
+  };
+  const inView = (e) => {
+    const t = paintTree(e);
+    if (e.localName === 'tr' && e.cells && e.cells.length) return t.includes(e.cells[0]);
+    if (t.includes(e)) return true;
+    if (win.getComputedStyle(e).pointerEvents !== 'none') return false;
+    const rects = e.getClientRects();
+    if (!rects.length) return false;
+    const r = rects[0], p = centre(r);
+    return p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom &&
+        p.x >= 0 && p.x <= win.innerWidth && p.y >= 0 && p.y <= win.innerHeight;
+  };
+  const scrollIntoView = (e) => {
+    if (e.scrollIntoView) e.scrollIntoView({behavior: 'instant', block: 'end', inline: 'nearest'});
+  };
+"""
+
+
+def _with_dom(body: str) -> str:
+    """A function of the element whose body can use the `_DOM` helpers."""
+    return "(el) => {" + _DOM + body + "}"
+
+
+#: Marionette's `webdriverSendKeysToElement` up to the first key
+#: (interaction.sys.mjs): the element's container scrolled into view when it
+#: is not in view, refused when it cannot take the focus
+#: (`isKeyboardInteractable`; <body> and the document element always can),
+#: focused only when it does not have the focus already, and then the caret
+#: moved to the end (`moveCaretToEnd`: a textarea or text input whose
+#: selection ends at 0, or a contenteditable). Answers "ok", or the element as
+#: Marionette prints it in the error.
+_KEYBOARD_FOCUS = _with_dom("""
+  const c = container(el);
+  if (!inView(c)) scrollIntoView(c);
   if (c.localName === 'body' || c === doc.documentElement) return 'ok';
   if (doc.activeElement !== c) {
     c.focus();
-    if (doc.activeElement !== c) {
-      let idents = '';
-      for (const a of ['id', 'class', 'href', 'name', 'src', 'type']) {
-        if (el.hasAttribute(a)) idents += ' ' + a + '="' + el.getAttribute(a) + '"';
-      }
-      return '<' + el.localName + idents + '>';
-    }
+    if (doc.activeElement !== c) return pp(el);
     const text = c.localName === 'textarea' || (c.localName === 'input' && c.type === 'text');
     if (text) {
       if (c.selectionEnd === 0) { const n = c.value.length; c.setSelectionRange(n, n); }
@@ -71,7 +103,59 @@ _KEYBOARD_FOCUS = """(el) => {
     }
   }
   return 'ok';
-}"""
+""")
+
+#: Marionette's `webdriverClickElement` up to the click (interaction.sys.mjs,
+#: the path geckodriver takes): an <input type=file> is refused; the container
+#: is scrolled into view when it is not in view and refused when it still is
+#: not; the click point is the in-view centre of its first client rect; and the
+#: click is refused when the first element of the paint tree there is not
+#: inside the container (`dom.isObscured`). There is NO check that the element
+#: is enabled, and no second attempt. Answers the point, in this frame's CSS
+#: pixels, or why the click was refused.
+_CLICK_CHECKS = _with_dom("""
+  if (el.localName === 'input' && el.type === 'file') return {refused: 'file'};
+  const c = container(el);
+  if (!inView(c)) scrollIntoView(c);
+  if (!inView(c)) return {refused: 'view', el: pp(el)};
+  const p = centre(c.getClientRects()[0]);
+  if (!c.contains(paintTree(c)[0])) {
+    return {refused: 'obscured', el: pp(c), over: pp(doc.elementFromPoint(p.x, p.y)),
+            x: p.x, y: p.y, none: c.style.pointerEvents === 'none'};
+  }
+  return {x: p.x, y: p.y, option: el.localName === 'option', disabled: !!el.disabled};
+""")
+
+#: Marionette's `clearElement` up to the clearing (interaction.sys.mjs):
+#: refused when the element is disabled (`dom.isDisabled`, an <option> or
+#: <optgroup> through its group), read-only (`dom.isReadOnly`) or not editable
+#: (`dom.isEditable`: a mutable form control or an editing host); scrolled into
+#: view and refused when it still is not; and nothing at all to do when an
+#: editing host is already empty, or a form control is empty and valid, in
+#: which case Marionette does not even focus it. Answers "clear", "empty", or
+#: why it was refused.
+_CLEAR_CHECKS = _with_dom("""
+  const disabled = (e) => {
+    if ((e.localName === 'option' || e.localName === 'optgroup') && !e.disabled) {
+      const group = e.parentElement && e.parentElement.closest('optgroup, select');
+      return group ? disabled(group) : false;
+    }
+    return e.matches(':disabled');
+  };
+  const readOnly = (e) => ['input', 'textarea'].includes(e.localName) && e.readOnly;
+  const host = el.isContentEditable || doc.designMode === 'on';
+  const mutable = el.localName === 'textarea' || (el.localName === 'input' &&
+      ['color', 'date', 'datetime-local', 'email', 'file', 'month', 'number',
+       'password', 'range', 'search', 'tel', 'text', 'time', 'url', 'week'].includes(el.type));
+  if (disabled(el)) return {refused: 'disabled', el: pp(el)};
+  if (readOnly(el)) return {refused: 'readonly', el: pp(el)};
+  if (!mutable && !host) return {refused: 'editable', el: pp(el)};
+  if (!inView(el)) scrollIntoView(el);
+  if (!inView(el)) return {refused: 'view', el: pp(el)};
+  if (host) return el.innerHTML === '' ? 'empty' : 'clear';
+  const empty = el.type === 'file' ? !el.files.length : el.value === '';
+  return el.validity.valid && empty ? 'empty' : 'clear';
+""")
 
 #: What the retry loop prints when an action on this element times out: the
 #: loop takes a selector for its message and never queries it once a node is
@@ -373,26 +457,75 @@ class WebElement:
 
     # ── acting ──────────────────────────────────────────────────────────────
     def click(self) -> None:
-        """Clicks the element with the pointer, the way a person would.
+        """Clicks the element with the pointer, the way a person would, once.
+
+        ⛔ ONE ATTEMPT, WITH MARIONETTE'S CHECKS AND NOTHING ELSE
+        (`_CLICK_CHECKS`). Until 0.3.7 this went through the engine's
+        Playwright loop, which waits until the element is visible, enabled,
+        stable and the hit target, and tries again until the timeout: a covered
+        element waited the whole timeout before failing, and a disabled button
+        failed where geckodriver clicks it.
 
         ⛔ AN <option> IS NOT CLICKED WITH THE POINTER, because inside a closed
         dropdown it has no box to land on. It is chosen through the engine's
         `select_option`, which fires `input` and `change` as trusted events -
         the same outcome Selenium's click on an option has. In a multiple
-        select it toggles, which is also Selenium's behaviour.
+        select it toggles, which is also Selenium's behaviour, and a disabled
+        option is left as it is, as Marionette's `selectOption` leaves it.
         """
+        said = self._call(_CLICK_CHECKS)
+        refused = said.get("refused")
+        if refused == "file":
+            raise exc.InvalidArgumentException(
+                "Cannot click <input type=file> elements")
+        if refused == "view":
+            raise exc.ElementNotInteractableException(
+                "Element %s could not be scrolled into view" % said["el"])
+        if refused == "obscured":
+            if said["none"]:
+                raise exc.ElementClickInterceptedException(
+                    "Element %s is not clickable at point (%d,%d) because it "
+                    "does not have pointer events enabled, and element %s "
+                    "would receive the click instead"
+                    % (said["el"], said["x"], said["y"], said["over"]))
+            raise exc.ElementClickInterceptedException(
+                "Element %s is not clickable at point (%d,%d) because another "
+                "element %s obscures it"
+                % (said["el"], said["x"], said["y"], said["over"]))
+        frame = self._page.lifecycle.frame(self._frame_id)
+        previous = frame.navigation if frame is not None else None
+        if said.get("option"):
+            if not said.get("disabled"):
+                self._choose_this_option()
+        else:
+            x, y = self._in_main_frame(said["x"], said["y"])
+            try:
+                self._page.actions.click_at(x, y)
+            except Exception as e:
+                raise _bridge.translate(e) from None
+        self._parent._await_click_navigation(self._page, self._frame_id, previous)
+
+    def _in_main_frame(self, x: float, y: float):
+        """A point of this element's frame, in the main frame's CSS pixels,
+        which is where the engine dispatches the pointer."""
+        main = self._page.main_frame_id
+        if self._frame_id == main:
+            return x, y
+        try:
+            outer = self._page.injected.content_origin(main)
+            inner = self._page.injected.content_origin(self._frame_id)
+        except Exception as e:
+            raise _bridge.translate(e) from None
+        return x + inner["x"] - outer["x"], y + inner["y"] - outer["y"]
+
+    def _choose_this_option(self) -> None:
         info = self._call(
-            "(el) => { if ((el.localName || '') !== 'option') return null;"
-            " const s = el.closest('select'); if (!s) return null;"
+            "(el) => { const s = el.closest('select'); if (!s) return null;"
             " return {multiple: s.multiple, index: el.index,"
             " selected: Array.from(s.options).filter(o => o.selected)"
             ".map(o => o.index)}; }")
-        frame = self._page.lifecycle.frame(self._frame_id)
-        previous = frame.navigation if frame is not None else None
         if info is None:
-            self._act("click")
-            self._parent._await_click_navigation(self._page, self._frame_id, previous)
-            return
+            return  # a <datalist>'s option: nothing a click can choose
         select = self._page.injected.call_raw(
             self._ctx, "(el) => el.closest('select')", [{"objectId": self._oid}])
         wanted = [info["index"]]
@@ -401,13 +534,14 @@ class WebElement:
             current ^= {info["index"]}
             wanted = sorted(current)
         try:
+            # One turn and no actionability states: the checks were
+            # Marionette's, above.
             self._page.actions.select_option(
                 _HANDLE, [{"index": i} for i in wanted],
                 frame_id=self._frame_id, element_id=select["objectId"],
-                timeout=self._parent._action_timeout())
+                timeout=self._parent._action_timeout(), once=True, force=True)
         except Exception as e:
             raise _bridge.translate(e) from None
-        self._parent._await_click_navigation(self._page, self._frame_id, previous)
 
     def submit(self) -> None:
         """Submits a form.
@@ -443,12 +577,28 @@ class WebElement:
         the `input` a user's Delete gives; the blur is what makes Firefox fire
         `change` itself, with its own shape, and not at all on a
         contenteditable, which never fires one.
+
+        ⛔ MARIONETTE'S CHECKS FIRST, ONCE (`_CLEAR_CHECKS`): a disabled,
+        read-only or non-editable element is `InvalidElementStateException`
+        at once, and an element already empty is left untouched, not even
+        focused. Until 0.3.7 the engine's loop waited for an editable element
+        until the timeout, and an empty field was focused and blurred.
         """
-        try:
-            self._act("fill", "")
-        except exc.JavascriptException as e:
-            raise exc.InvalidElementStateException(str(e)) from None
-        self._act("blur")
+        said = self._call(_CLEAR_CHECKS)
+        if said == "empty":
+            return
+        if isinstance(said, dict):
+            if said["refused"] == "view":
+                raise exc.ElementNotInteractableException(
+                    "Element %s could not be scrolled into view" % said["el"])
+            raise exc.InvalidElementStateException({
+                "disabled": "Element is disabled: %s",
+                "readonly": "Element is read-only: %s",
+                "editable": "Unable to clear element that cannot be edited: %s",
+            }[said["refused"]] % said["el"])
+        # One turn, no actionability states: the checks were Marionette's.
+        self._act("fill", "", once=True, force=True)
+        self._act("blur", once=True, force=True)
 
     def send_keys(self, *value: str) -> None:
         """Simulates typing into the element.

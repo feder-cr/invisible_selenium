@@ -72,7 +72,10 @@ class WebDriver:
                      "platformName": _platform_name(),
                      "acceptInsecureCerts": False,
                      "pageLoadStrategy": self._page_load_strategy,
-                     "timeouts": self._timeouts._to_json(),
+                     # Every field, as geckodriver answers it: `_to_json`
+                     # leaves out the zero ones, which is for SETTING.
+                     "timeouts": {"implicit": 0, "pageLoad": 300000,
+                                  "script": 30000},
                      "unhandledPromptBehavior": "dismiss and notify"}
 
     # ── session ─────────────────────────────────────────────────────────────
@@ -243,11 +246,11 @@ class WebDriver:
         inner = described.get("contentFrameId")
         if not inner:
             raise exc.NoSuchFrameException("the element is not a frame")
-        # The frame's utility world must exist before anything is asked of it.
-        try:
-            page.injected.context_id(inner, timeout=10)
-        except Exception as e:
-            raise exc.NoSuchFrameException(str(e)) from None
+        # ⛔ NOT WAITING FOR THE FRAME'S DOCUMENT, as Marionette does not
+        # (`switchToFrame` takes the child browsing context and returns). Until
+        # 0.3.7 this waited up to 10 s for the frame's utility world and raised
+        # NoSuchFrameException when it did not come; the command that next asks
+        # something of the frame waits for its world itself.
         self._frame = inner
 
     def _parent_frame(self) -> None:
@@ -268,7 +271,7 @@ class WebDriver:
         try:
             page.lifecycle.goto(url, frame_id=page.main_frame_id,
                                 until=_LOAD_STATE[self._page_load_strategy],
-                                timeout=self._timeouts.page_load or 300)
+                                timeout=self._timeouts.page_load)
         except NavigationInterrupted as e:
             # Another document took the page before ours committed - the
             # previous page's own redirect, say. Nothing failed to load, so
@@ -277,11 +280,17 @@ class WebDriver:
             raise exc.WebDriverException(str(e)) from None
         except NavigationError as e:
             raise exc.WebDriverException("Reached error page: %s" % e) from None
-        except TimeoutError as e:
-            raise exc.TimeoutException(str(e)) from None
+        except TimeoutError:
+            raise self._navigation_timed_out() from None
         except Exception as e:
             raise _bridge.translate(e) from None
         self._frame = None
+
+    def _navigation_timed_out(self) -> exc.TimeoutException:
+        """Marionette's words for a page load past the page load timeout
+        (navigate.sys.mjs, a `TimedPromise` "Navigation timed out")."""
+        return exc.TimeoutException(
+            "Navigation timed out after %d ms" % self._timeouts._page_load)
 
     def _await_click_navigation(self, page, frame_id: str,
                                 previous: Optional[str]) -> None:
@@ -306,7 +315,7 @@ class WebDriver:
             frame_id, previous, timeout=_CLICK_UNLOAD_WINDOW)
         if navigation is None:
             return
-        limit = self._timeouts.page_load or 300
+        limit = self._timeouts.page_load
         began = time.monotonic()
         try:
             life.wait_for_state(frame_id, "commit", navigation=navigation,
@@ -321,70 +330,46 @@ class WebDriver:
             life.wait_for_state(frame_id, state,
                                 timeout=max(0.0, limit - (time.monotonic() - began)))
         except TimeoutError:
-            raise exc.TimeoutException(
-                "Navigation timed out after %d ms" % round(limit * 1000)) from None
+            raise self._navigation_timed_out() from None
 
     def _history(self, command: str) -> None:
         """Back, forward, reload - and wait for the document to change, then
         for the state of the page load strategy (none: for nothing more).
 
-        ⛔ READ THE CURRENT NAVIGATION FIRST. History gives back no
-        navigationId, so the only thing to anchor the wait on is that this one
-        has changed; `Page.goBack` answers the moment the browser accepts the
-        request, and waiting for `load` then returns at once, on the document
-        being left. A same-document entry (a hash, a `pushState`) changes the
-        address without a new navigation, so the address is watched too.
+        ⛔ THE MARK IS TAKEN BEFORE THE COMMAND. History gives back no
+        navigationId, so the only thing to anchor the wait on is that the
+        frame's navigation has moved; `Page.goBack` answers the moment the
+        browser accepts the request, and waiting for `load` then returns at
+        once, on the document being left.
+
+        ⛔ A SAME-DOCUMENT ENTRY ENDS THE WAIT AT ONCE, as `hashchange` and
+        `popstate` end Marionette's (navigate.sys.mjs): the core's
+        `wait_for_new_navigation` answers None for it ([B290]). Until 0.3.7
+        this waited for an address that moved and gave it half a second of
+        grace before believing it.
         """
         self._check_alert()
         page = self._current_page()
         frame_id = page.main_frame_id
-        frame = page.lifecycle.frame(frame_id)
-        previous = frame.navigation if frame is not None else None
-        before = self._location(page)
+        since = page.lifecycle.mark(frame_id)
         result = page.send(command, {"frameId": frame_id}
                            if command != "Page.reload" else {}) or {}
         if command != "Page.reload" and not result.get("success"):
             return  # nothing behind or ahead: Selenium does nothing either
-        deadline = time.monotonic() + (self._timeouts.page_load or 300)
-        #: When the address first moved without a new navigation.
-        moved_at = None
-        while True:
-            frame = page.lifecycle.frame(frame_id)
-            if frame is not None and frame.navigation != previous:
-                state = _LOAD_STATE[self._page_load_strategy]
-                if state is None:
-                    # Started: "none" waits for nothing more, not even for
-                    # the new document's world.
-                    self._frame = None
-                    return
-                try:
-                    page.lifecycle.wait_for_state(
-                        frame_id, state, navigation=frame.navigation,
-                        timeout=max(0.05, deadline - time.monotonic()))
-                except TimeoutError as e:
-                    raise exc.TimeoutException(str(e)) from None
-                except NavigationError as e:
-                    raise exc.WebDriverException(str(e)) from None
-                break
-            # ⛔ AN ADDRESS THAT MOVED IS NOT YET A SAME-DOCUMENT ENTRY. A
-            # restore from the back-forward cache changes the address while
-            # the old document's world is still being torn down; reading the
-            # title at that instant asked a context that no longer existed.
-            # Only when no new navigation follows within a short grace is it a
-            # hash or `pushState` entry.
-            if command != "Page.reload" and self._location(page) != before:
-                if moved_at is None:
-                    moved_at = time.monotonic()
-                elif time.monotonic() - moved_at > self._SAME_DOCUMENT_GRACE_S:
-                    break
-            if not _bridge.poll(deadline, 0.05):
-                raise exc.TimeoutException("the %s did not complete" % command)
-        self._await_utility_world(page, frame_id)
+        state = _LOAD_STATE[self._page_load_strategy]
+        try:
+            navigation = page.lifecycle.wait_for_new_navigation(
+                frame_id, since, state, timeout=self._timeouts.page_load)
+        except TimeoutError:
+            raise self._navigation_timed_out() from None
+        except NavigationError as e:
+            raise exc.WebDriverException(str(e)) from None
         self._frame = None
-
-    #: How long an address change waits for a navigation before it is taken
-    #: for a same-document history entry.
-    _SAME_DOCUMENT_GRACE_S = 0.5
+        # A new document under "normal" or "eager": its utility world is the
+        # next thing asked of it. "none" waits for nothing more, and a
+        # same-document entry has kept its world.
+        if navigation is not None and state is not None:
+            self._await_utility_world(page, frame_id)
 
     def _await_utility_world(self, page, frame_id: str) -> None:
         """Wait until the frame's utility world answers again.
@@ -462,7 +447,7 @@ class WebDriver:
         else:
             self._check_alert()
             root_oid = None
-        deadline = time.monotonic() + (self._timeouts.implicit_wait or 0)
+        deadline = time.monotonic() + self._timeouts.implicit_wait
         while True:
             try:
                 if root_oid is None:
@@ -475,7 +460,8 @@ class WebDriver:
                 raise
             except Exception as e:
                 raise _bridge.translate(e) from None
-            if found or not _bridge.poll(deadline, 0.1):
+            # Every 10 ms, as Marionette's `PollPromise` (sync.sys.mjs).
+            if found or not _bridge.poll(deadline, 0.01):
                 break
         elements = [self._web_element_cls(self, page, frame_id, oid)
                     for oid in found]
@@ -530,7 +516,7 @@ class WebDriver:
         frame_id = self._frame_id()
         if not isinstance(script, str):
             script = getattr(script, "script", None) or str(script)
-        timeout = self._timeouts.script or 30
+        timeout = self._timeouts.script
         # ⛔ A SCRIPT IS SENT ONCE, WHATEVER HAPPENS TO ITS DOCUMENT. A world
         # that went under it does not say whether it ran: Juggler sends a
         # message still waiting for its answer again to the document that
@@ -670,35 +656,53 @@ class WebDriver:
         self._engine_context.set_cookies(gone)
 
     # ── timeouts ────────────────────────────────────────────────────────────
+    # ⛔ THE THREE SETTERS TAKE WHAT `float()` TAKES, AS SELENIUM'S DO
+    # (`int(float(time_to_wait) * 1000)`): a string of digits is accepted and
+    # None is a TypeError. A 0 is a 0: the page load and an asynchronous
+    # script then time out at once, where until 0.3.7 a 0 meant the default.
     def implicitly_wait(self, time_to_wait: float) -> None:
         """How long `find_element` keeps looking before giving up."""
-        self._timeouts.implicit_wait = time_to_wait
+        self._timeouts.implicit_wait = float(time_to_wait)
 
     def set_script_timeout(self, time_to_wait: float) -> None:
         """How long a script may run before a TimeoutException."""
-        self._timeouts.script = time_to_wait
+        self._timeouts.script = float(time_to_wait)
 
     def set_page_load_timeout(self, time_to_wait: float) -> None:
         """How long a page load may take before a TimeoutException."""
-        self._timeouts.page_load = time_to_wait
+        self._timeouts.page_load = float(time_to_wait)
 
     @property
     def timeouts(self) -> Timeouts:
-        return self._timeouts
+        """The session's timeouts, as a new object: setting a value on it does
+        not change the session, as in Selenium."""
+        return Timeouts(self._timeouts.implicit_wait, self._timeouts.page_load,
+                        self._timeouts.script)
 
     @timeouts.setter
     def timeouts(self, timeouts: Timeouts) -> None:
-        self._timeouts = Timeouts(timeouts.implicit_wait, timeouts.page_load,
-                                  timeouts.script)
+        """Sets the fields of `timeouts` that are not 0, and leaves the others
+        as they are: Selenium sends `timeouts._to_json()`, which names only
+        those."""
+        sent = timeouts._to_json()
+        if "implicit" in sent:
+            self._timeouts.implicit_wait = sent["implicit"] / 1000
+        if "pageLoad" in sent:
+            self._timeouts.page_load = sent["pageLoad"] / 1000
+        if "script" in sent:
+            self._timeouts.script = sent["script"] / 1000
 
     def _action_timeout(self) -> float:
-        """How long an element action waits for its element to be actionable.
+        """How long an element action may spend on the engine's own waits.
 
-        Selenium fails at once when an element cannot be interacted with; the
-        engine retries until the element settles, because an animation that
-        ends 200 ms later is not a reason to fail. The wait is bounded by the
-        implicit wait, and never shorter than a few seconds."""
-        return max(5.0, float(self._timeouts.implicit_wait or 0))
+        ⛔ NOT HOW LONG IT RETRIES: `click` and `clear` try once, with
+        Marionette's checks, as geckodriver does. What this bounds is what the
+        engine adds on top of the original and the original does not have: the
+        typing persona's pause before the first key, which starts again from
+        every change the field shows, and the remaining engine actions that
+        still go through its loop (`submit`'s Enter, a file input's files).
+        Bounded by the implicit wait, and never shorter than a few seconds."""
+        return max(5.0, self._timeouts.implicit_wait)
 
     # ── screenshots ─────────────────────────────────────────────────────────
     def _screenshot_clip(self, page, clip: dict) -> str:

@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-13
+
+The pin moves to invisible-core 41.39.0.
+
+### Changed
+- **`click` tries once, with Marionette's checks and no others**, as
+  geckodriver's element click (`webdriverClickElement`). An
+  `<input type=file>` raises `InvalidArgumentException`; an element out of
+  view is scrolled with `block: end` and raises
+  `ElementNotInteractableException` ("could not be scrolled into view") when
+  it still is not; a covered element raises `ElementClickInterceptedException`
+  at once, with Marionette's message; a disabled element is clicked. Until
+  0.3.7 a click waited for the element to be visible, enabled, stable and the
+  topmost one at the point, and tried again until a timeout.
+- **`clear` checks as Marionette's `clearElement` does, once**: a disabled,
+  read-only or non-editable element raises `InvalidElementStateException` at
+  once, and an element already empty is left alone, not even focused.
+- **Timeouts are Selenium's `Timeouts`.** A 0 is a 0 (a page load or an
+  asynchronous script then times out at once, where a 0 used to mean the
+  default); `driver.timeouts = ...` sets only the fields that are not 0 and
+  leaves the others; `driver.timeouts` hands back a copy; anything but a number
+  is a `TypeError`. A page load past its timeout says "Navigation timed out
+  after N ms".
+- The implicit wait looks every 10 ms, as Marionette's.
+- `switch_to.frame` does not wait for the frame's document.
+- `ActionChains.key_down`, `key_up` and `send_keys_to_element` with an
+  element click it with the pointer and no check, as Selenium's
+  `self.click(element)`.
+
+### Fixed
+- **`back()` and `forward()` to a same-document entry (a hash, a
+  `pushState`) return at once**, as `hashchange` and `popstate` end
+  Marionette's wait; they gave half a second of grace first.
+
 ## [0.3.7] - 2026-10-12
 
 The pin moves to invisible-core 41.38.0.
