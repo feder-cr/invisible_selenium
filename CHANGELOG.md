@@ -70,6 +70,9 @@ Every behaviour below was read from the original - Selenium 4.51, geckodriver
   `partial link text`, `tag name`, `xpath` at line 1 column 15".
 
 ### Fixed
+- **`send_keys` of text with a character the US layout has no key for
+  presses the keys that exist** and inserts that character in its place: it
+  inserted the whole text, so a page saw "café" arrive with no keystroke.
 - **The text sent to a prompt is kept until the prompt is accepted**, also
   through another `switch_to.alert`, the usual way to write it:
   `switch_to.alert.send_keys("x")` then `switch_to.alert.accept()` gave the
