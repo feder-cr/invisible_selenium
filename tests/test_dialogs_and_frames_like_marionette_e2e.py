@@ -29,8 +29,14 @@ import pytest
 
 from invisible_selenium.common import exceptions as exc
 from invisible_selenium.webdriver.common.by import By
+from invisible_selenium.webdriver.support import expected_conditions as EC
+from invisible_selenium.webdriver.support.ui import WebDriverWait
 
 pytestmark = pytest.mark.e2e
+
+#: A dialog shows, and a removed frame goes, in well under a second; the waits
+#: end as soon as it happens, and this only bounds a run where it never does.
+SHOWS_WITHIN_S = 5
 
 PAGES = {
     "/alerting": b"<!doctype html><title>a</title><p id=p>p</p>"
@@ -98,14 +104,16 @@ def page(driver, site):
 
 def _open_alert(d, kind="alert"):
     d.execute_script("setTimeout(() => %s('hi'), 0)" % kind)
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        try:
-            d.switch_to.alert
-            return
-        except exc.NoAlertPresentException:
-            time.sleep(0.05)
-    raise AssertionError("the dialog never opened")
+    WebDriverWait(d, SHOWS_WITHIN_S).until(EC.alert_is_present(),
+                                           "the dialog never opened")
+
+
+def _discarded(d):
+    try:
+        d.execute_script("return 1")
+    except exc.NoSuchWindowException:
+        return True
+    return False
 
 
 def _dismissed(d, kind="alert"):
@@ -270,7 +278,10 @@ def test_a_frame_that_went_is_a_discarded_browsing_context(page, site):
     page.get(site + "framed")
     page.switch_to.frame(0)
     page.execute_script("setTimeout(() => window.frameElement.remove(), 0)")
-    time.sleep(0.3)
+    # The frame goes from a timer, after the script has returned: a fixed
+    # 0.3 s sleep raced it on a loaded runner, as the dialogs' 0.4 s did.
+    WebDriverWait(page, SHOWS_WITHIN_S).until(_discarded,
+                                              "the frame never went")
     for command in (lambda: page.switch_to.frame(0), page.get_cookies,
                     lambda: page.find_element(By.ID, "p")):
         with pytest.raises(exc.NoSuchWindowException,

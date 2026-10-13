@@ -22,14 +22,19 @@ from __future__ import annotations
 
 import http.server
 import threading
-import time
 
 import pytest
 
 from invisible_selenium.common import exceptions as exc
 from invisible_selenium.webdriver.common.by import By
+from invisible_selenium.webdriver.support import expected_conditions as EC
+from invisible_selenium.webdriver.support.ui import WebDriverWait
 
 pytestmark = pytest.mark.e2e
+
+#: A dialog or a window shows in well under a second; the waits end as soon as
+#: it is there, and this only bounds a run where it never comes.
+SHOWS_WITHIN_S = 5
 
 VARIANTS = ("expected one of `css selector`, `link text`, `partial link text`, "
             "`tag name`, `xpath`")
@@ -86,8 +91,12 @@ def page(driver, site):
 
 
 def _open(d, script):
+    # The dialog opens from a timer, after the script has returned, so the
+    # test waits for it as a Selenium user does. A fixed 0.4 s sleep was red
+    # on a runner with four browsers, where the dialog came later.
     d.execute_script("setTimeout(() => { %s }, 0)" % script)
-    time.sleep(0.4)
+    WebDriverWait(d, SHOWS_WITHIN_S).until(EC.alert_is_present(),
+                                           "the dialog never opened")
 
 
 def test_an_unknown_strategy_is_refused_in_serde_s_words(page):
@@ -139,8 +148,13 @@ def test_a_window_is_found_by_its_name(page, site):
     # blocker off.
     first = page.current_window_handle
     page.find_element(By.ID, "l").click()
-    time.sleep(1.5)
+    WebDriverWait(page, SHOWS_WITHIN_S).until(EC.number_of_windows_to_be(2))
+    opened = next(h for h in page.window_handles if h != first)
+    page.switch_to.window(opened)
+    WebDriverWait(page, SHOWS_WITHIN_S).until(EC.title_is("named"))
+    page.switch_to.window(first)
     page.switch_to.window("myname")
+    assert page.current_window_handle == opened
     assert page.title == "named"
     page.switch_to.window(first)
     with pytest.raises(exc.NoSuchWindowException) as e:
