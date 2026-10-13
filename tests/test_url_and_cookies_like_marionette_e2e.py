@@ -34,10 +34,20 @@ pytestmark = pytest.mark.e2e
 
 PAGE = b"<!doctype html><html><head><title>p</title></head><body>p</body></html>"
 
+#: Set when the busy page's beacon reaches the server: the page sends it in
+#: the task that holds its thread, so from then on the page is busy.
+BUSY = threading.Event()
+
 
 @pytest.fixture(scope="module")
 def site():
     class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path.startswith("/busy"):
+                BUSY.set()
+            self.send_response(204)
+            self.end_headers()
+
         def do_GET(self):
             if self.path.startswith("/outer"):
                 port = self.server.server_address[1]
@@ -79,10 +89,16 @@ def page(driver, site):
 
 # ── current_url ─────────────────────────────────────────────────────────────
 def test_the_current_url_answers_while_the_page_is_busy(page, site):
+    # The page sends a beacon and holds its thread for 6 s in the same task,
+    # so once the server has the beacon the page is busy, and the url is
+    # never asked before it is. A fixed 0.5 s sleep could ask before, and the
+    # test passed without testing anything. Not a synchronous request: its
+    # wait runs a nested event loop, and a read arriving then was served.
+    BUSY.clear()
     page.execute_script(
         "setTimeout(() => { const end = Date.now() + 6000;"
-        " while (Date.now() < end); }, 0)")
-    time.sleep(0.5)
+        " navigator.sendBeacon('/busy'); while (Date.now() < end); }, 0)")
+    assert BUSY.wait(5), "the busy page's beacon never came"
     began = time.monotonic()
     assert page.current_url == site
     assert time.monotonic() - began < 2.0
