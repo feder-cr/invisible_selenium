@@ -64,13 +64,35 @@ class Select:
         raise NoSuchElementException(f"Could not locate element with index {index}")
 
     def select_by_visible_text(self, text: str) -> None:
+        """Select every option whose text, with its white space normalised,
+        is `text` (XPath's `normalize-space`, on the option's whole text
+        content); an option that matches and is hidden by its style is
+        NoSuchElementException. With no such option and a space in `text`,
+        the options containing its longest word are tried against their
+        visible text exactly. Selenium's order and words, where until 0.4.0
+        this compared the visible text and never looked at visibility."""
+        opts = self._el.find_elements(
+            By.XPATH, f".//option[normalize-space(.) = {self._escape_string(text)}]")
         matched = False
-        for opt in self.options:
-            if opt.text.strip() == " ".join(text.split()):
-                self._set_selected(opt)
-                if not self.is_multiple:
-                    return
-                matched = True
+        for opt in opts:
+            if not self._has_css_property_and_visible(opt):
+                raise NoSuchElementException(f"Invisible option with text: {text}")
+            self._set_selected(opt)
+            if not self.is_multiple:
+                return
+            matched = True
+        if not opts and " " in text:
+            word = max(text.split(" "), key=len)
+            candidates = self.options if word == "" else self._el.find_elements(
+                By.XPATH, f".//option[contains(.,{self._escape_string(word)})]")
+            for candidate in candidates:
+                if text == candidate.text:
+                    if not self._has_css_property_and_visible(candidate):
+                        raise NoSuchElementException(f"Invisible option with text: {text}")
+                    self._set_selected(candidate)
+                    if not self.is_multiple:
+                        return
+                    matched = True
         if not matched:
             raise NoSuchElementException(f"Could not locate element with visible text: {text}")
 
@@ -104,17 +126,23 @@ class Select:
         if not self.is_multiple:
             raise NotImplementedError("You may only deselect options of a multi-select")
         matched = False
-        for opt in self.options:
-            if opt.text.strip() == " ".join(text.split()):
-                self._unset_selected(opt)
-                matched = True
+        opts = self._el.find_elements(
+            By.XPATH, f".//option[normalize-space(.) = {self._escape_string(text)}]")
+        for opt in opts:
+            if not self._has_css_property_and_visible(opt):
+                raise NoSuchElementException(f"Invisible option with text: {text}")
+            self._unset_selected(opt)
+            matched = True
         if not matched:
             raise NoSuchElementException(f"Could not locate element with visible text: {text}")
 
     def _set_selected(self, option) -> None:
-        if not option.is_enabled():
-            raise NotImplementedError("You may not select a disabled option")
+        """An option already selected is left as it is, disabled or not; only
+        one that would be clicked is refused when disabled (Selenium's order;
+        until 0.4.0 a selected disabled option raised)."""
         if not option.is_selected():
+            if not option.is_enabled():
+                raise NotImplementedError("You may not select a disabled option")
             option.click()
 
     def _unset_selected(self, option) -> None:
@@ -122,10 +150,28 @@ class Select:
             option.click()
 
     @staticmethod
+    def _has_css_property_and_visible(option) -> bool:
+        """Selenium's test of an option a user could see: none of
+        `visibility`, `display` and `opacity` computes to one of the values
+        that hide it."""
+        for name in ("visibility", "display", "opacity"):
+            if option.value_of_css_property(name) in ("hidden", "none", "0", "0.0"):
+                return False
+        return True
+
+    @staticmethod
     def _escape_string(value: str) -> str:
+        """The XPath literal Selenium builds for `value`. A value with both
+        kinds of quote is a `concat()` of its double-quote-separated parts,
+        and one that ENDS in a double quote gets a second one at the end, as
+        Selenium's does: such a text matches no option there, and matches
+        none here."""
         if '"' in value and "'" in value:
             parts = value.split('"')
-            return "concat(" + ", '\"', ".join(f'"{p}"' for p in parts) + ")"
+            literal = "concat(" + ", '\"', ".join(f'"{p}"' for p in parts)
+            if value.endswith('"'):
+                literal += ", '\"'"
+            return literal + ")"
         if '"' in value:
             return f"'{value}'"
         return f'"{value}"'

@@ -15,14 +15,19 @@ answer.
 from __future__ import annotations
 
 import base64
+import ipaddress
+import json
+import math
+import re
 import threading
 import time
+import urllib.parse
 import uuid
 import warnings
 from typing import Any, Dict, List, Optional
 
-from ... import _bridge
-from invisible_core.juggler import domain_matches, host_of
+from ... import _bridge, _serde
+from invisible_core.juggler.connection import Interrupted
 from invisible_core.juggler.injected import ContextDestroyed
 from invisible_core.juggler.lifecycle import NavigationError, NavigationInterrupted
 from ...common import exceptions as exc
@@ -120,11 +125,23 @@ class WebDriver:
         self._watched.add(page.target_id)
 
         def on_event(method, params, page=page):
-            if method == "Page.dialogOpened":
-                with self._dialogs_lock:
-                    self._dialogs[page.target_id] = dict(params)
+            if method != "Page.dialogOpened":
+                return
+            if params.get("type") == "beforeunload":
+                # ⛔ ACCEPTED AT ONCE, as Marionette accepts it in a session
+                # that is not BiDi (`#handleOpenModalDialog`): the navigation,
+                # the reload or the close it asked about goes through, and no
+                # command hears of it. Until 0.4.0 it held the navigation until
+                # the page load timeout. From the reader thread, so `post`.
+                page.conn.post("Page.handleDialog",
+                               {"dialogId": params["dialogId"], "accept": True},
+                               session=page.session)
+                return
+            with self._dialogs_lock:
+                self._dialogs[page.target_id] = dict(params)
 
         page.on_event(on_event)
+        page.end_waits_when(_ends_a_command)
         self._prepare_page(page)
 
     def _prepare_page(self, page) -> None:
@@ -149,31 +166,43 @@ class WebDriver:
             self._dialogs.pop(page.target_id, None)
 
     def _check_alert(self) -> None:
-        """W3C's default for an unhandled prompt: dismiss it, and say so.
+        """W3C's default for an unhandled prompt: dismiss it, and say so, in
+        Marionette's words (`#handleUserPrompts`).
 
         ⛔ A command must not run under an open dialog: the page's script is
         suspended inside `alert()`, so an evaluation would wait for an answer
         nobody is going to give. Selenium's default behaviour is "dismiss and
-        notify", and it is what this does.
+        notify", and it is what this does. The commands that call this are
+        the ones whose Marionette counterpart does; the window handles,
+        `switch_to.window`, `parent_frame` and the timeouts do not.
         """
         page = self._current_page()
         dialog = self._pending_dialog(page)
         if dialog is None:
             return
         self._dialog_answered(page)
-        accept = (dialog.get("type") or "") == "beforeunload"
         try:
             page.send("Page.handleDialog",
-                      {"dialogId": dialog["dialogId"], "accept": accept},
+                      {"dialogId": dialog["dialogId"], "accept": False},
                       timeout=10)
         except Exception:
             pass
         raise exc.UnexpectedAlertPresentException(
             alert_text=dialog.get("message") or "",
-            msg="Dismissed user prompt dialog: %s" % (dialog.get("message") or ""))
+            msg='Unexpected %s dialog detected. Performed handler "dismiss"'
+                % (dialog.get("type") or "alert"))
 
     def _frame_id(self) -> str:
-        return self._frame or self._current_page().main_frame_id
+        """The frame commands go to. A frame that has gone is
+        NoSuchWindowException, as Marionette's `assert.open` on the current
+        browsing context answers; the top document is where `current_url`
+        and the window commands still go."""
+        page = self._current_page()
+        if self._frame is None:
+            return page.main_frame_id
+        if page.lifecycle.frame(self._frame) is None:
+            raise exc.NoSuchWindowException("Browsing context has been discarded")
+        return self._frame
 
     def _select_page(self, page) -> None:
         self._watch(page)
@@ -204,6 +233,7 @@ class WebDriver:
             pass
 
     def _new_window(self) -> None:
+        self._check_alert()
         self._before_new_page()
         page = self._engine_context.new_page()
         self._select_page(page)
@@ -213,10 +243,15 @@ class WebDriver:
 
     def close(self) -> None:
         """Closes the current window. Closing the last one ends the session,
-        as it does with geckodriver."""
+        as it does with geckodriver.
+
+        An open dialog is dismissed and raised first, and the window stays,
+        as Marionette's `close` does. A `beforeunload` the page asks is
+        accepted (`_watch`): the close runs the page's unload handlers, as
+        Firefox's own tab close does, where until 0.4.0 it skipped them."""
+        self._check_alert()
         page = self._current_page()
-        self._dialog_answered(page)
-        page.close()
+        page.close(run_before_unload=True)
         deadline = time.monotonic() + 5
         while page.target_id in self._engine_context.live_targets():
             if not _bridge.poll(deadline, 0.05):
@@ -230,22 +265,55 @@ class WebDriver:
         return self._switch_to
 
     # ── frames ──────────────────────────────────────────────────────────────
-    def _switch_frame(self, frame_id: Optional[str]) -> None:
-        self._current_page()
-        self._frame = frame_id
+    def _switch_frame(self, reference) -> None:
+        """Selenium's `SWITCH_TO_FRAME`: None for the top document, an index,
+        or an element, as geckodriver reads the `id` (`FrameId`) and
+        Marionette's `switchToFrame` answers it.
 
-    def _enter_frame(self, element: WebElement) -> None:
-        element._check_alive()
-        page = element._page
+        ⛔ AN INDEX COUNTS THE CURRENT FRAME'S CHILD BROWSING CONTEXTS, in the
+        order they were created (`browsingContext.children`): an `<object>`
+        or an `<embed>` that holds a document is one, and so is an iframe in
+        a shadow root. Until 0.4.0 it counted the `iframe, frame` elements of
+        the document with the implicit wait, so it skipped both and waited
+        where Marionette answers at once."""
+        if reference is not None and not isinstance(reference, WebElement):
+            # geckodriver's `FrameId`: an unsigned short, an element or null.
+            # What JSON cannot carry is json's TypeError, as in Selenium.
+            json.dumps(reference)
+            if isinstance(reference, bool) or not isinstance(reference, int) \
+                    or not 0 <= reference <= 0xFFFF:
+                raise _serde.untagged("FrameId", {"id": reference})
+        page = self._current_page()
+        if reference is None:
+            self._check_alert()
+            self._frame = None
+            return
+        current = self._frame_id()
+        self._check_alert()
+        children = [fid for fid, f in page.lifecycle.frame_tree().items()
+                    if f["parent"] == current]
+        if isinstance(reference, int):
+            if reference >= len(children):
+                raise exc.NoSuchFrameException(
+                    "Unable to locate frame with index: %d" % reference)
+            self._frame = children[reference]
+            return
+        if reference._page is not page or reference._frame_id != current:
+            raise exc.NoSuchElementException(
+                "The element with the reference %s is not known in the "
+                "current browsing context" % reference.id)
+        reference._check_alive()
         try:
             described = page.send("Page.describeNode",
-                                  {"frameId": element._frame_id,
-                                   "objectId": element._oid}) or {}
+                                  {"frameId": current,
+                                   "objectId": reference._oid}) or {}
         except Exception as e:
             raise _bridge.translate(e) from None
         inner = described.get("contentFrameId")
-        if not inner:
-            raise exc.NoSuchFrameException("the element is not a frame")
+        if inner not in children:
+            raise exc.NoSuchFrameException(
+                "Unable to locate frame for element: %s"
+                % reference._call("el => String(el)"))
         # ⛔ NOT WAITING FOR THE FRAME'S DOCUMENT, as Marionette does not
         # (`switchToFrame` takes the child browsing context and returns). Until
         # 0.3.7 this waited up to 10 s for the frame's utility world and raised
@@ -272,6 +340,12 @@ class WebDriver:
             page.lifecycle.goto(url, frame_id=page.main_frame_id,
                                 until=_LOAD_STATE[self._page_load_strategy],
                                 timeout=self._timeouts.page_load)
+        except Interrupted:
+            # A dialog opened while the page loaded: Marionette's wait ends
+            # there (`navigate.sys.mjs`, `onPromptOpened`) and the dialog
+            # stays open for the next command. Until 0.4.0 the load waited
+            # for an answer nobody gave, to the page load timeout.
+            pass
         except NavigationInterrupted as e:
             # Another document took the page before ours committed - the
             # previous page's own redirect, say. Nothing failed to load, so
@@ -311,26 +385,29 @@ class WebDriver:
         if state is None:
             return
         life = page.lifecycle
-        navigation = life.wait_for_navigation_start(
-            frame_id, previous, timeout=_CLICK_UNLOAD_WINDOW)
-        if navigation is None:
-            return
-        limit = self._timeouts.page_load
-        began = time.monotonic()
         try:
-            life.wait_for_state(frame_id, "commit", navigation=navigation,
-                                timeout=_CLICK_UNLOAD_TIMEOUT)
-        except TimeoutError:
-            return  # it started, and did not unload: Marionette stops waiting
-        except NavigationInterrupted:
-            pass  # another document took its place: wait for that one below
-        except NavigationError as e:
-            raise exc.WebDriverException("Reached error page: %s" % e) from None
-        try:
-            life.wait_for_state(frame_id, state,
-                                timeout=max(0.0, limit - (time.monotonic() - began)))
-        except TimeoutError:
-            raise self._navigation_timed_out() from None
+            navigation = life.wait_for_navigation_start(
+                frame_id, previous, timeout=_CLICK_UNLOAD_WINDOW)
+            if navigation is None:
+                return
+            limit = self._timeouts.page_load
+            began = time.monotonic()
+            try:
+                life.wait_for_state(frame_id, "commit", navigation=navigation,
+                                    timeout=_CLICK_UNLOAD_TIMEOUT)
+            except TimeoutError:
+                return  # it started, and did not unload: Marionette stops waiting
+            except NavigationInterrupted:
+                pass  # another document took its place: wait for that one below
+            except NavigationError as e:
+                raise exc.WebDriverException("Reached error page: %s" % e) from None
+            try:
+                life.wait_for_state(frame_id, state,
+                                    timeout=max(0.0, limit - (time.monotonic() - began)))
+            except TimeoutError:
+                raise self._navigation_timed_out() from None
+        except Interrupted:
+            return  # a dialog opened: the wait ends, the dialog stays open
 
     def _history(self, command: str) -> None:
         """Back, forward, reload - and wait for the document to change, then
@@ -360,6 +437,9 @@ class WebDriver:
         try:
             navigation = page.lifecycle.wait_for_new_navigation(
                 frame_id, since, state, timeout=self._timeouts.page_load)
+        except Interrupted:
+            self._frame = None  # a dialog opened: as `get`
+            return
         except TimeoutError:
             raise self._navigation_timed_out() from None
         except NavigationError as e:
@@ -399,18 +479,28 @@ class WebDriver:
         """Refreshes the current page."""
         self._history("Page.reload")
 
-    def _location(self, page) -> str:
-        try:
-            return page.injected.evaluate(page.main_frame_id, "location.href",
-                                          timeout=10) or ""
-        except Exception:
-            return ""
-
     @property
     def current_url(self) -> str:
-        """The URL of the current page (the top-level document)."""
+        """The URL of the current page (the top-level document).
+
+        ⛔ READ WHERE MARIONETTE READS IT, IN THE BROWSER: `getCurrentUrl`
+        answers `browsingContext.currentURI` from the parent process, so a
+        page busy in a long script does not delay it. Here it is the
+        lifecycle's record of the main frame, set by every commit and every
+        same-document navigation. Until 0.4.0 this evaluated `location.href`
+        in the page, which waited for a busy page and answered "" on any
+        failure; Marionette never answers ""."""
         self._check_alert()
-        return self._location(self._current_page())
+        return self._url_of(self._current_page().main_frame_id)
+
+    def _url_of(self, frame_id: str) -> str:
+        """A frame's URL as the browser has it (Marionette's `_getCurrentURL`,
+        `browsingContext.currentURI`): the lifecycle's record, never a
+        question to the page."""
+        frame = self._current_page().lifecycle.frame(frame_id)
+        if frame is None:
+            raise exc.NoSuchWindowException("Browsing context has been discarded")
+        return frame.url
 
     @property
     def title(self) -> str:
@@ -456,10 +546,20 @@ class WebDriver:
                         timeout=30)
                 else:
                     found = _bridge.query(page, frame_id, root_oid, by, str(value))
+            except Interrupted:
+                found = None
             except exc.WebDriverException:
                 raise
             except Exception as e:
                 raise _bridge.translate(e) from None
+            if found is None or self._pending_dialog(page) is not None:
+                # ⛔ A DIALOG OPENED WHILE THE COMMAND LOOKED. Marionette's
+                # query ends there and answers null, which geckodriver cannot
+                # read as what the command returns (measured on Firefox 151:
+                # 0.6 s into an implicit wait of 5). The dialog stays open.
+                raise exc.WebDriverException(
+                    "Failed to convert data to an object" if single
+                    else "Failed to interpret value as array")
             # Every 10 ms, as Marionette's `PollPromise` (sync.sys.mjs).
             if found or not _bridge.poll(deadline, 0.01):
                 break
@@ -547,6 +647,13 @@ class WebDriver:
                 return marshal.result(remote)
             except ContextDestroyed:
                 return None  # it ran, and its document went before the answer
+        except Interrupted:
+            # ⛔ A DIALOG OPENED WHILE THE SCRIPT RAN: None at once, the dialog
+            # open for the next command, as Marionette answers
+            # (`MarionetteCommandsParent.sendQuery` races the script against
+            # the dialog). Until 0.4.0 the script waited for an answer nobody
+            # gave, to the script timeout.
+            return None
         except TimeoutError:
             raise exc.TimeoutException(
                 "Timed out after %s ms" % int(timeout * 1000)) from None
@@ -562,69 +669,92 @@ class WebDriver:
             marshal.release()
 
     # ── cookies ─────────────────────────────────────────────────────────────
+    # ⛔ AS MARIONETTE READS THEM (`cookie.sys.mjs`), WHICH IS NOT THE COOKIE
+    # RULES A REQUEST FOLLOWS. Four things 0.4.0 did otherwise: the document is
+    # the current FRAME's, not the top one's (`_getCurrentURL({top: false})`);
+    # a cookie belongs when its host is the document's host or one of its
+    # parent domains, host-only or not; its path belongs when the document's
+    # path CONTAINS it, anywhere, not only as a prefix; and `secure` filters
+    # nothing. One thing this cannot do: Marionette lists the unpartitioned
+    # cookies and those of the document's own partition, and Juggler's list
+    # carries no partition key, so a cookie a third-party frame set for this
+    # host under another site's partition is listed too.
     def _document_cookies(self) -> List[dict]:
-        url = self.current_url
-        host = host_of(url)
-        path = _path_of(url)
-        secure = url.startswith("https:")
-        out = []
-        for c in self._engine_context.cookies():
-            if not domain_matches(c.get("domain") or "", host):
-                continue
-            cpath = c.get("path") or "/"
-            if not path.startswith(cpath):
-                continue
-            if c.get("secure") and not secure:
-                continue
-            out.append(c)
-        return out
+        self._check_alert()
+        url = urllib.parse.urlsplit(self._url_of(self._frame_id()))
+        host = _hostname(url)
+        path = url.path or "/"
+        hosts = set()
+        name = host
+        while True:
+            hosts.update((name, "." + name))
+            name = re.sub(r"^.*?\.", "", name, count=1)
+            if "." not in name:
+                break
+        return [c for c in self._engine_context.cookies()
+                if c.get("domain") in hosts and (c.get("path") or "/") in path]
 
     def get_cookies(self) -> List[dict]:
         """The cookies visible to the current document."""
         return [_to_selenium_cookie(c) for c in self._document_cookies()]
 
     def get_cookie(self, name) -> Optional[Dict]:
-        """A single cookie by name, or None."""
-        if not name or not str(name).strip():
+        """A single cookie by name, or None. The LAST one with that name, as
+        geckodriver answers (`cookies.pop()` on the ones that match)."""
+        if not name or name.isspace():
             raise ValueError("Cookie name cannot be empty")
-        for c in self.get_cookies():
-            if c["name"] == name:
-                return c
-        return None
+        named = [c for c in self.get_cookies() if c["name"] == name]
+        return named[-1] if named else None
 
     def add_cookie(self, cookie_dict) -> None:
-        """Adds a cookie to the current document's domain."""
-        if "sameSite" in cookie_dict and cookie_dict["sameSite"] not in (
-                "Strict", "Lax", "None"):
-            raise AssertionError("Invalid sameSite value")
-        if "name" not in cookie_dict or "value" not in cookie_dict:
-            raise exc.InvalidArgumentException("a cookie needs a name and a value")
-        url = self.current_url
-        if not url.startswith(("http:", "https:")):
+        """Adds a cookie to the current document's domain, with Marionette's
+        checks and words (`addCookie` in driver.sys.mjs, `cookie.add`)."""
+        if "sameSite" in cookie_dict:
+            assert cookie_dict["sameSite"] in ["Strict", "Lax", "None"]
+        cookie = _checked_cookie(cookie_dict)
+        self._check_alert()
+        url = urllib.parse.urlsplit(self._url_of(self._frame_id()))
+        if url.scheme not in ("http", "https"):
+            raise exc.InvalidCookieDomainException("Document is cookie-averse")
+        if cookie.get("sameSite") not in (None, "None", "Lax", "Strict"):
+            raise exc.InvalidArgumentException(
+                'Expected cookie "sameSite" to be one of None,Lax,Strict,None, '
+                'got "%s"' % cookie["sameSite"])
+        if cookie.get("expiry", 0) > 2 ** 53 - 1:
+            raise exc.InvalidArgumentException(
+                'Expected cookie "expiry" to be a positive integer, got '
+                '[object Number] %d' % cookie["expiry"])
+        host = _hostname(url)
+        host_only = cookie.get("domain") is None
+        domain = host if host_only else cookie["domain"]
+        if domain.startswith("."):
+            domain = domain[1:]
+        if not domain:
+            raise exc.InvalidCookieDomainException(domain)
+        if not host_only and not _is_ip(domain):
+            domain = "." + domain
+        if not (host.endswith(domain) or "." + host == domain or host == domain):
             raise exc.InvalidCookieDomainException(
-                "cookies can only be set on an http(s) document, not %s" % url)
-        host = host_of(url)
-        domain = cookie_dict.get("domain") or host
-        if not domain_matches(domain, host):
-            raise exc.InvalidCookieDomainException(
-                "Cookie domain %r does not match the current document" % domain)
-        cookie = {"name": str(cookie_dict["name"]),
-                  "value": str(cookie_dict["value"]),
-                  "domain": domain,
-                  "path": cookie_dict.get("path") or "/",
-                  "secure": bool(cookie_dict.get("secure", False)),
-                  "httpOnly": bool(cookie_dict.get("httpOnly", False))}
+                "Cookies may only be set for the current domain (%s)" % host)
+        entry = {"name": cookie["name"], "value": cookie["value"],
+                 "domain": re.sub(r":\d+$", "", domain),
+                 "path": cookie.get("path", "/"),
+                 "secure": cookie.get("secure", False),
+                 "httpOnly": cookie.get("httpOnly", False)}
         # ⛔ A SESSION COOKIE IS SENT WITHOUT `expires`, never with -1. Juggler
         # reads -1 as "session" and ALSO passes `-1 * 1000` ms as the expiry,
         # a moment in 1969, so the cookie service drops the cookie without an
         # error (`TargetRegistry.js`, `setCookies`). Omitted, the engine gives
-        # it a far expiry and still marks it as a session cookie.
-        if cookie_dict.get("expiry") is not None:
-            cookie["expires"] = int(cookie_dict["expiry"])
-        if cookie_dict.get("sameSite"):
-            cookie["sameSite"] = cookie_dict["sameSite"]
+        # it a far expiry and still marks it as a session cookie. A dated one
+        # is capped as Marionette caps it (`maybeCapExpiry`), which Juggler's
+        # `setCookies` does not.
+        if "expiry" in cookie:
+            entry["expires"] = min(cookie["expiry"],
+                                   time.time() + _COOKIE_MAX_AGE_CAP)
+        if "sameSite" in cookie:
+            entry["sameSite"] = cookie["sameSite"]
         try:
-            self._engine_context.set_cookies([cookie])
+            self._engine_context.set_cookies([entry])
         except Exception as e:
             raise exc.UnableToSetCookieException(str(e)) from None
 
@@ -635,6 +765,9 @@ class WebDriver:
         `Browser.clearCookies` empties the whole context, which is more than
         Selenium's contract allows.
         """
+        # Selenium's own check: Firefox deletes every cookie for "".
+        if not name or name.isspace():
+            raise ValueError("Cookie name cannot be empty")
         doomed = [c for c in self._document_cookies() if c.get("name") == name]
         self._expire(doomed)
 
@@ -751,6 +884,7 @@ class WebDriver:
     # ── the window ──────────────────────────────────────────────────────────
     def get_window_rect(self) -> dict:
         """The window's position and outer size."""
+        self._check_alert()
         page = self._current_page()
         return page.injected.evaluate(
             page.main_frame_id,
@@ -767,6 +901,7 @@ class WebDriver:
 
     def set_window_size(self, width, height, windowHandle: str = "current") -> None:
         """Resizes the window so its OUTER size is width x height."""
+        self._check_alert()
         page = self._current_page()
         chrome = page.injected.evaluate(
             page.main_frame_id,
@@ -777,6 +912,7 @@ class WebDriver:
             "height": max(1, int(height) - int(chrome["h"]))}})
 
     def set_window_rect(self, x=None, y=None, width=None, height=None) -> dict:
+        self._check_alert()
         if (x is not None or y is not None) and width is None and height is None:
             raise exc.WebDriverException(
                 "moving the window is not supported: the window position is "
@@ -791,17 +927,20 @@ class WebDriver:
     def maximize_window(self) -> None:
         """Brings the window back to the size the profile declares, which is
         already a maximized window on the declared screen."""
+        self._check_alert()
         page = self._current_page()
         viewport = (self._engine_context.options or {}).get("viewport")
         if viewport:
             page.send("Page.setViewportSize", {"viewportSize": dict(viewport)})
 
     def minimize_window(self) -> None:
+        self._check_alert()
         raise exc.WebDriverException(
             "minimize_window is not supported: a minimized window stops "
             "painting, and a page can tell")
 
     def fullscreen_window(self) -> None:
+        self._check_alert()
         raise exc.WebDriverException(
             "fullscreen_window is not supported: it changes the screen "
             "geometry the profile declares")
@@ -824,24 +963,65 @@ class WebDriver:
         """Called after ending a session. Nothing to do here."""
 
 
+def _ends_a_command(method: str, params: dict) -> bool:
+    """The events that end a command, as a dialog ends Marionette's
+    (`MarionetteCommandsParent.sendQuery` races every content query against
+    `#deferredDialogOpened`; the navigation wait ends on `onPromptOpened`):
+    every dialog but a `beforeunload`, which is accepted at once and never
+    reaches a command (`_watch`)."""
+    return method == "Page.dialogOpened" and params.get("type") != "beforeunload"
+
+
 _STRATEGIES = {"id", "xpath", "link text", "partial link text", "name",
                "tag name", "class name", "css selector"}
 
 
-def _path_of(url: str) -> str:
-    from urllib.parse import urlparse
-    return urlparse(url).path or "/"
+#: Firefox's `network.cookie.maxageCap` (StaticPrefList.yaml), 400 days: how
+#: far ahead Marionette lets a cookie's expiry go (`Services.cookies.
+#: maybeCapExpiry`). Juggler's `setCookies` does not cap, so the cap is
+#: applied here, where the expiry is given.
+_COOKIE_MAX_AGE_CAP = 34560000
+
+
+def _hostname(url: urllib.parse.SplitResult) -> str:
+    """What `URL.hostname` answers in the browser: lowercased, an IPv6
+    address in its brackets."""
+    host = url.hostname or ""
+    return "[%s]" % host if ":" in host else host
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def _checked_cookie(cookie_dict) -> dict:
+    """The cookie as geckodriver hands it to Marionette: refused in serde's
+    words when a field has the wrong type (`_serde.check_cookie`), the fields
+    it does not know dropped, a null optional one absent, `secure` and
+    `httpOnly` False when absent. What Marionette checks after it
+    (`cookie.fromJSON`) is checked where Marionette does, in `add_cookie`."""
+    _serde.check_cookie(cookie_dict)
+    out = {key: cookie_dict[key] for key, _ in _serde.COOKIE_FIELDS
+           if cookie_dict.get(key) is not None}
+    out.setdefault("secure", False)
+    out.setdefault("httpOnly", False)
+    return out
 
 
 def _to_selenium_cookie(c: dict) -> dict:
+    """A cookie as Marionette's `cookie.iter` gives it: the expiry rounded to
+    whole seconds and only for a cookie that is not a session one; `sameSite`
+    always, "None" when the cookie has none."""
     out = {"name": c.get("name"), "value": c.get("value"),
            "path": c.get("path") or "/", "domain": c.get("domain"),
            "secure": bool(c.get("secure")), "httpOnly": bool(c.get("httpOnly"))}
-    expires = c.get("expires")
-    if expires is not None and not c.get("session") and float(expires) > 0:
-        out["expiry"] = int(expires)
-    if c.get("sameSite"):
-        out["sameSite"] = c["sameSite"]
+    if not c.get("session"):
+        out["expiry"] = math.floor(float(c["expires"]) + 0.5)
+    out["sameSite"] = c.get("sameSite") or "None"
     return out
 
 

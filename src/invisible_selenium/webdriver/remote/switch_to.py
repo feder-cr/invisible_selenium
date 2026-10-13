@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
+from ... import _serde
 from ...common import exceptions as exc
 from ..common.alert import Alert
 from ..common.by import By
-from ..common.window import WindowTypes
 from .webelement import WebElement
 
 
@@ -40,21 +40,18 @@ class SwitchTo:
                 except exc.NoSuchElementException:
                     raise exc.NoSuchFrameException(frame_reference) from None
             frame_reference = element
-        if isinstance(frame_reference, int):
-            frames = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
-            if frame_reference < 0 or frame_reference >= len(frames):
-                raise exc.NoSuchFrameException(str(frame_reference))
-            frame_reference = frames[frame_reference]
-        if not isinstance(frame_reference, WebElement):
-            raise exc.InvalidArgumentException(
-                "frame reference must be an index, a name or id, or an element")
-        driver._enter_frame(frame_reference)
+        driver._switch_frame(frame_reference)
 
     def new_window(self, type_hint: Optional[str] = None) -> None:
-        """Open a new tab or window and switch to it."""
-        if type_hint not in (None, WindowTypes.TAB, WindowTypes.WINDOW):
-            raise exc.InvalidArgumentException(
-                "type_hint must be 'tab' or 'window'")
+        """Open a new tab or window and switch to it.
+
+        Any string is a type, as Marionette takes it (`newWindow`: one it
+        does not know is a tab); what is not a string is geckodriver's
+        refusal. ⛔ Every page here is its own window, `tab` included:
+        Juggler's `Browser.newPage` opens a window, and a tab beside the
+        current one is the engine's to add (Selenium's tab hides the page it
+        was opened from)."""
+        _serde.check_string_or_null("type", type_hint)
         self._driver._new_window()
 
     def parent_frame(self) -> None:
