@@ -504,11 +504,14 @@ class WebDriver:
 
     @property
     def title(self) -> str:
-        """The title of the current page."""
+        """The title of the current page, read where Marionette reads it: the
+        top document's window global, in the browser (`Page.title`,
+        firefox-44), so a page busy in a script does not hold the answer.
+        Until 0.4.0 this evaluated `document.title` in the page."""
         self._check_alert()
         page = self._current_page()
         try:
-            return page.injected.title(page.main_frame_id) or ""
+            return page.send("Page.title", {})["title"]
         except Exception as e:
             raise _bridge.translate(e) from None
 
