@@ -57,6 +57,13 @@ Every behaviour below was read from the original - Selenium 4.51, geckodriver
 - **`shadow_root`** answers a closed root too, and an element without one is
   `NoSuchShadowRootException` with no message.
 
+### Fixed
+- **On Linux, the line endings a page reads are Windows'**: a `Blob` or a
+  `File` made with `endings: "native"` turns `\n` into `\r\n`, and the text
+  of a selection across two blocks is joined by `\r\n`, as on Windows.
+- **`speechSynthesis.getVoices()` is Windows' list**: David, Mark, Zira and
+  the two Desktop voices, in that order, and none of them is the default.
+
 ### Not yet as the original
 - `new_window("tab")` opens a window: every page of the engine is its own
   window, and the tab Selenium opens hides the page it came from.
