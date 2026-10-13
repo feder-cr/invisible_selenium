@@ -57,7 +57,23 @@ Every behaviour below was read from the original - Selenium 4.51, geckodriver
 - **`shadow_root`** answers a closed root too, and an element without one is
   `NoSuchShadowRootException` with no message.
 
+- **An `Alert` asks for the dialog open now at every call**, as Selenium's:
+  no dialog, or one already answered, is `NoAlertPresentException` with no
+  message (it was "No dialog is present", "The dialog is no longer open", or
+  the old text), and `send_keys` on an alert or a confirm says "User prompt
+  of type alert is not interactable".
+- **`switch_to.window(name)` finds a window by its `window.name`** when no
+  handle matches, as the Selenium client does. The name is read in an
+  isolated world, so no script of the page sees the read.
+- **An unknown locator strategy is refused in geckodriver's words**:
+  "unknown variant `foo`, expected one of `css selector`, `link text`,
+  `partial link text`, `tag name`, `xpath` at line 1 column 15".
+
 ### Fixed
+- **The text sent to a prompt is kept until the prompt is accepted**, also
+  through another `switch_to.alert`, the usual way to write it:
+  `switch_to.alert.send_keys("x")` then `switch_to.alert.accept()` gave the
+  page the prompt's default value.
 - **On Linux, the line endings a page reads are Windows'**: a `Blob` or a
   `File` made with `endings: "native"` turns `\n` into `\r\n`, and the text
   of a selection across two blocks is joined by `\r\n`, as on Windows.
