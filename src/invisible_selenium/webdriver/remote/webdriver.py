@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Optional
 from ... import _bridge, _serde
 from invisible_core.juggler.connection import Interrupted
 from invisible_core.juggler.injected import ContextDestroyed
-from invisible_core.juggler.lifecycle import NavigationError, NavigationInterrupted
+from invisible_core.juggler.lifecycle import (NavigationError, NavigationInterrupted,
+                                              NavigationMark)
 from ...common import exceptions as exc
 from ..common.by import By
 from ..common.timeouts import Timeouts
@@ -45,6 +46,14 @@ _LOAD_STATE = {"normal": "load", "eager": "domcontentloaded", "none": None}
 #: (`document.open()`, `window.stop()`), which Marionette waits through
 #: (`WebDriver._await_after_a_stop`).
 _STOPPED_BY_THE_PAGE = "NS_BINDING_ABORTED"
+
+
+def _waited_through(e: NavigationError) -> bool:
+    """A navigation that ended without its document in a way Marionette's
+    classic `get` waits through: stopped by the page, or replaced by another
+    document before it committed. Anything else is a load that failed,
+    geckodriver's "Reached error page"."""
+    return isinstance(e, NavigationInterrupted) or str(e) == _STOPPED_BY_THE_PAGE
 
 #: How long after a click Marionette looks for the page to start unloading,
 #: and how long it then gives the unload (`navigate.sys.mjs`, the unload timer
@@ -371,9 +380,9 @@ class WebDriver:
                                 until=_LOAD_STATE[self._page_load_strategy],
                                 timeout=self._timeouts.page_load)
         except NavigationError as e:
-            if str(e) != _STOPPED_BY_THE_PAGE:
-                return self._navigation_failed(e)
-            self._await_after_a_stop(page, began)
+            if not _waited_through(e):
+                raise exc.WebDriverException("Reached error page: %s" % e) from None
+            self._await_after_a_stop(page, began, e.navigation)
         except Interrupted:
             # A dialog opened while the page loaded: Marionette's wait ends
             # there (`navigate.sys.mjs`, `onPromptOpened`) and the dialog
@@ -386,43 +395,50 @@ class WebDriver:
             raise _bridge.translate(e) from None
         self._frame = None
 
-    def _navigation_failed(self, e: NavigationError) -> None:
-        """A navigation the browser ended without its document, in
-        Marionette's words."""
-        if isinstance(e, NavigationInterrupted):
-            # Another document took the page before ours committed - the
-            # previous page's own redirect, say. Nothing failed to load, so
-            # not "Reached error page"; Firefox's own WebDriver fails it too
-            # ("A new navigation interrupted an unfinished navigation").
-            raise exc.WebDriverException(str(e)) from None
-        raise exc.WebDriverException("Reached error page: %s" % e) from None
-
-    def _await_after_a_stop(self, page, began: float) -> None:
+    def _await_after_a_stop(self, page, began: float, stopped: Optional[str]) -> None:
         """What Marionette does when the page being left stops the navigation
-        (`document.open()`, `window.stop()`): it waits on. Its listener ends a
+        (`document.open()`, `window.stop()`) or another document takes the page
+        before ours commits (a `location.replace`, a form submit, going back):
+        it waits on. Its listener ends a
         navigation on a document's DOMContentLoaded or pageshow only once the
         page being left has unloaded (`navigate.sys.mjs`, `seenUnload`), and a
         page that stopped the navigation never unloaded; so the wait ends on a
         later navigation of the page, or at the page load timeout. Measured on
         geckodriver 0.37.1 and retail Firefox 151: "Navigation timed out after
-        20000 ms", three times in three ([B302]). Until firefox-46 the engine
-        dropped the stop and took the page's rewrite for the navigation's
-        commit; a `get()` timed out all the same, by that accident.
-        A dialog that opens meanwhile ends the wait, as in `get()`."""
+        20000 ms", three times in three ([B302]); and where the page sent
+        itself elsewhere, get() returned in 0.3 s on that page. Until firefox-46
+        the engine dropped the stop and took the page's rewrite for the
+        navigation's commit; a `get()` timed out all the same, by that
+        accident. Until 0.5.2 an interruption raised WebDriverException in the
+        words of WebDriver BiDi's NavigationManager ("A new navigation
+        interrupted an unfinished navigation"), which the classic `get` does
+        not use.
+        A dialog that opens meanwhile ends the wait, as in `get()`.
+
+        ⛔ THE WAIT IS FOR THE FIRST NAVIGATION AFTER THE ONE STOPPED, not
+        after now: the engine reports the stop at the end of the task that
+        caused it, so a page that stopped ours by navigating
+        (`location.replace`, a form submit) has started its own before the stop
+        arrives, and a mark taken now would wait past it to the timeout. Any
+        document after it ends the wait, as Marionette's listener follows
+        one."""
         limit = self._timeouts.page_load
         while True:
-            mark = page.lifecycle.mark(page.main_frame_id)
+            now = page.lifecycle.mark(page.main_frame_id)
+            since = NavigationMark(stopped, now.same_document, now.interruptions)
             left = (None if limit is None
                     else max(0.0, limit - (time.monotonic() - began)))
             try:
                 page.lifecycle.wait_for_new_navigation(
-                    page.main_frame_id, mark,
-                    _LOAD_STATE[self._page_load_strategy], timeout=left)
+                    page.main_frame_id, since,
+                    _LOAD_STATE[self._page_load_strategy], timeout=left,
+                    replaced="follow")
                 return
             except NavigationError as e:
-                if str(e) != _STOPPED_BY_THE_PAGE:
-                    return self._navigation_failed(e)
+                if not _waited_through(e):
+                    raise exc.WebDriverException("Reached error page: %s" % e) from None
                 # Stopped again: Marionette's wait goes on the same way.
+                stopped = e.navigation
             except Interrupted:
                 return
             except TimeoutError:

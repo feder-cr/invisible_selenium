@@ -1,0 +1,153 @@
+"""A `get()` that something stops or replaces on its way answers as
+geckodriver's does, for every way a page can ([B302], the class).
+
+Measured on Selenium 4.51, geckodriver 0.37.1 and retail Firefox 151
+(`C:/tmp/b230/oracle_selenium_class.py`, page load timeout 5 s, 2026-10-14):
+
+- document.open, window.stop: TimeoutException "Navigation timed out after N
+  ms" at the page load timeout, the old page staying. Marionette ends a
+  navigation on a document's DOMContentLoaded or pageshow only once the page
+  being left has unloaded (`navigate.sys.mjs`, `seenUnload`), and a page that
+  stopped the navigation never unloads;
+- location.replace, location.assign, a form submit, an iframe navigating the
+  top, history.back: get() returns in 0.3 s, the page where the page sent it
+  (the stop unloads it into another document, which ends the wait);
+- history.pushState, a meta refresh, nothing: get() returns on its page.
+
+Until firefox-46 the engine dropped the stop; with it reported, get() said
+"Reached error page" until it waited as Marionette does. Same site (one
+process) and another site (`localhost`, a Fission process swap), twice, back
+to back; the page being left acts 300 ms after it loads, and the server holds
+the page asked for 1.5 s, so the get is always on its way when the page acts.
+"""
+from __future__ import annotations
+
+import http.server
+import threading
+import time
+
+import pytest
+
+from invisible_selenium.common import exceptions as exc
+
+pytestmark = pytest.mark.e2e
+
+HELD_S = 1.5
+PAGE_LOAD_S = 3
+ACT = {
+    "docopen": "document.open(); document.write('<html><body><h1>rewritten</h1></body></html>'); document.close();",
+    "stop": "window.stop();",
+    "replace": "location.replace('/other?from=replace');",
+    "assign": "location.assign('/other?from=assign');",
+    "pushstate": "history.pushState({}, '', '/pushed');",
+    "back": "history.back();",
+    "submit": "document.getElementById('f').submit();",
+    "meta": None,
+    "iframe_top": None,
+    "none": "",
+}
+#: geckodriver's answer to each kind, and where the page then is.
+EXPECT = {
+    "docopen": ("timeout", "/old"),
+    "stop": ("timeout", "/old"),
+    "replace": ("returned", "/other?from=replace"),
+    "assign": ("returned", "/other?from=assign"),
+    "back": ("returned", "/start"),
+    "submit": ("returned", "/other?from=submit"),
+    "iframe_top": ("returned", "/other?from=iframe"),
+    "pushstate": ("landed", None),
+    "meta": ("landed", None),
+    "none": ("landed", None),
+}
+
+
+def _old_page(kind):
+    if kind == "meta":
+        return ("<html><head><meta http-equiv=refresh content='0.3;url=/other?from=meta'>"
+                "</head><body><p>old</p></body></html>")
+    if kind == "iframe_top":
+        return ("<html><body><p>old</p><iframe srcdoc=\"<script>setTimeout(() => "
+                "{top.location = '/other?from=iframe'}, 300)</script>\"></iframe></body></html>")
+    return ("<html><body><p>old</p><form id=f action='/other' method=get>"
+            "<input name=from value=submit></form><script>setTimeout(() => {%s}, 300)"
+            "</script></body></html>" % ACT[kind])
+
+
+@pytest.fixture(scope="module")
+def server():
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/new":
+                time.sleep(HELD_S)
+                body = "<html><body><p>new</p></body></html>"
+            elif path == "/old":
+                body = _old_page(self.path.split("k=")[1].split("&")[0])
+            else:
+                body = "<html><body><p>%s</p></body></html>" % path
+            body = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def handle(self):
+            try:
+                super().handle()
+            except ConnectionError:
+                pass  # the browser let go of a response it stopped
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv.server_address[1]
+    srv.shutdown()
+
+
+@pytest.fixture(scope="module")
+def driver(firefox_binary):
+    from invisible_selenium import webdriver
+    d = webdriver.Firefox(seed=4302, binary_path=firefox_binary, headless=True)
+    d.set_page_load_timeout(PAGE_LOAD_S)
+    yield d
+    d.quit()
+
+
+@pytest.mark.parametrize("kind", list(ACT))
+def test_a_get_stopped_on_its_way_answers_as_geckodriver(driver, server, kind):
+    same = "http://127.0.0.1:%d" % server
+    cross = "http://localhost:%d" % server
+    answer, end = EXPECT[kind]
+    for site, target_base in (("same", same), ("cross", cross)):
+        for i in range(2):
+            driver.get(same + "/start?k=%s&i=%d" % (kind, i))
+            driver.get(same + "/old?k=%s&i=%d" % (kind, i))
+            target = target_base + "/new?k=%s&i=%d" % (kind, i)
+            began = time.monotonic()
+            error = None
+            try:
+                driver.get(target)
+            except exc.WebDriverException as e:
+                error = e
+            took = time.monotonic() - began
+            where = (kind, site, i, repr(error), took, driver.current_url)
+            if answer == "timeout":
+                assert isinstance(error, exc.TimeoutException), where
+                assert error.msg == "Navigation timed out after %d ms" % (PAGE_LOAD_S * 1000), where
+                assert PAGE_LOAD_S - 0.5 <= took < PAGE_LOAD_S + 3, where
+                assert driver.current_url == same + "/old?k=%s&i=%d" % (kind, i), where
+            elif answer == "returned":
+                assert error is None, where
+                assert took < HELD_S, where
+                expected = same + end
+                if end == "/start":
+                    expected = same + "/start?k=%s&i=%d" % (kind, i)
+                assert driver.current_url == expected, where
+            else:
+                assert error is None, where
+                assert took >= HELD_S - 0.1, where
+                assert driver.current_url == target, where
