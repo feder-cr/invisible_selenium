@@ -77,3 +77,12 @@ def test_a_window_type_that_is_not_a_string():
                                 "at line 1 column 10")
     _serde.check_string_or_null("type", "foo")
     _serde.check_string_or_null("type", None)
+
+
+@pytest.mark.parametrize("using, column", [("foo", 15), ("", 12)])
+def test_a_locator_strategy_geckodriver_does_not_know(using, column):
+    error = _serde.unknown_strategy(using)
+    assert error.msg == (
+        "unknown variant `%s`, expected one of `css selector`, `link text`, "
+        "`partial link text`, `tag name`, `xpath` at line 1 column %d"
+        % (using, column))

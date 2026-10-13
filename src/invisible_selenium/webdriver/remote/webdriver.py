@@ -165,6 +165,14 @@ class WebDriver:
         with self._dialogs_lock:
             self._dialogs.pop(page.target_id, None)
 
+    def _prompt_text(self, page, text: str) -> None:
+        """What the prompt open on `page` will be accepted with: it belongs
+        to the dialog, not to the `Alert` that sent it."""
+        with self._dialogs_lock:
+            dialog = self._dialogs.get(page.target_id)
+            if dialog is not None:
+                dialog["promptText"] = text
+
     def _check_alert(self) -> None:
         """W3C's default for an unhandled prompt: dismiss it, and say so, in
         Marionette's words (`#handleUserPrompts`).
@@ -220,8 +228,9 @@ class WebDriver:
         return list(self._engine_context.live_targets())
 
     def _switch_window(self, handle: str) -> None:
-        if handle not in self._engine_context.live_targets():
-            raise exc.NoSuchWindowException("Unable to locate window: %s" % handle)
+        targets = list(self._engine_context.live_targets())
+        if handle not in targets:
+            handle = self._window_named(handle, targets)
         try:
             page = self._engine_context.adopt(handle)
         except Exception as e:
@@ -231,6 +240,21 @@ class WebDriver:
             page.send("Page.bringToFront", {}, timeout=10)
         except Exception:
             pass
+
+    def _window_named(self, name: str, targets: List[str]) -> str:
+        """The window whose `window.name` is `name`: what the Selenium client
+        looks for when no handle matches (`switch_to.py` `_w3c_window`),
+        window by window in handle order, and "Unable to locate window" when
+        none has it. Until 0.5.0 a name was never found.
+
+        Read in the isolated world, so no script of the page sees the read,
+        and without moving the focus from window to window as the client
+        does to read it: it ends on the same window."""
+        for target in targets:
+            page = self._engine_context.adopt(target)
+            if page.injected.evaluate(page.main_frame_id, "window.name") == name:
+                return target
+        raise exc.NoSuchWindowException("Unable to locate window: %s" % name)
 
     def _new_window(self) -> None:
         self._check_alert()
@@ -530,7 +554,9 @@ class WebDriver:
         if isinstance(by, str) and by not in _STRATEGIES:
             custom = By.get_finder(by) if hasattr(By, "get_finder") else None
             if custom is None:
-                raise exc.InvalidArgumentException("unknown locator strategy %r" % by)
+                # geckodriver's refusal of the body, in serde's words; until
+                # 0.5.0 "unknown locator strategy 'foo'".
+                raise _serde.unknown_strategy(by)
             by = custom
         if value is None:
             value = ""

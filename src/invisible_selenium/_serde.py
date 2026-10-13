@@ -130,6 +130,21 @@ def check_string_or_null(field: str, value) -> None:
         raise invalid(refusal, _column('{%s: ' % json.dumps(field), value))
 
 
+#: geckodriver's `LocatorStrategy`, in its order. The client turns `id`,
+#: `name` and `class name` into CSS before it sends anything.
+LOCATOR_STRATEGIES = ("css selector", "link text", "partial link text",
+                      "tag name", "xpath")
+
+
+def unknown_strategy(using: str) -> exc.InvalidArgumentException:
+    """A locator strategy geckodriver does not know: serde names it and the
+    variants, after the string, in the body Selenium sends for a find
+    (`{"using": ..., "value": ...}`, the element's id after them)."""
+    return invalid("unknown variant `%s`, expected one of %s" % (
+        using, ", ".join("`%s`" % v for v in LOCATOR_STRATEGIES)),
+        _column('{"using": ', using))
+
+
 def untagged(enum: str, body: dict) -> exc.InvalidArgumentException:
     """No variant of an untagged enum matched: serde says so after the
     whole body, as for `SWITCH_TO_FRAME`'s `FrameId`."""
