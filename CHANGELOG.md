@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-14
+
+The pin moves to invisible-core 46.39.0, which seals the firefox-46 engine.
+
+### Fixed
+- **A `get()` that the page stops or replaces on its way answers as
+  geckodriver's does**, measured for every way a page can: stopped with
+  nothing in its place (`document.open()`, `window.stop()`), it waits out the
+  page load timeout and raises "Navigation timed out after N ms"; replaced by
+  another document (a `location.replace`, a form submit, an iframe navigating
+  the top, going back), it returns once that document loads. Until 0.5.1 the
+  engine dropped the stop and `get()` ended by accident, and a replacement
+  raised WebDriverException in the words of WebDriver BiDi ("A new navigation
+  interrupted an unfinished navigation"), which the classic `get` never says.
+- **The wheel is born before the page sees it**, as keys and mouse moves are
+  since 0.35.7: `event.timeStamp` was the instant the wheel reached the page,
+  0 to 2 ms below `performance.now()` in the handler where a real wheel is 6
+  to 14, and half of the wheel events failed the filter a tracker applies.
+
 ## [0.5.1] - 2026-10-13
 
 The pin moves to invisible-core 45.39.0, which seals the firefox-45 engine.
