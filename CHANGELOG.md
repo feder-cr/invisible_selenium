@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-14
+
+The pin moves to invisible-core 47.39.0, which seals the firefox-47 engine.
+
+### Fixed
+- **A page can no longer tell that the engine carries the automation protocol.**
+  Every engine until firefox-47 registered the protocol as a chrome package named
+  `juggler`, and a page tells a registered package from an absent one with one
+  line, `new Worker("chrome://juggler/...")`: it returns on our engine and throws
+  `SecurityError` on Firefox. Captcha vendors started probing it in October 2026,
+  which is why a challenge solved by hand was still refused. firefox-47 loads the
+  protocol from `resource://gre/modules/juggler/`, a namespace every Firefox has
+  and inside which a page cannot tell which files exist; the engine now registers
+  exactly the chrome packages and resource substitutions Firefox 151 does.
+- **A `get()` that the page stops or replaces on its way answers as
+  geckodriver's does**, measured for every way a page can: stopped with
+  nothing in its place (`document.open()`, `window.stop()`), it waits out the
+  page load timeout and raises "Navigation timed out after N ms"; replaced by
+  another document (a `location.replace`, a form submit, an iframe navigating
+  the top, going back), it returns once that document loads. Until 0.5.1 the
+  engine dropped the stop and `get()` ended by accident, and a replacement
+  raised WebDriverException in the words of WebDriver BiDi ("A new navigation
+  interrupted an unfinished navigation"), which the classic `get` never says.
+- **The wheel is born before the page sees it**, as keys and mouse moves are
+  since 0.35.7: `event.timeStamp` was the instant the wheel reached the page,
+  0 to 2 ms below `performance.now()` in the handler where a real wheel is 6
+  to 14, and half of the wheel events failed the filter a tracker applies.
+
 ## [0.5.1] - 2026-10-13
 
 The pin moves to invisible-core 45.39.0, which seals the firefox-45 engine.
