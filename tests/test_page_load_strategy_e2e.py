@@ -126,6 +126,7 @@ def test_eager_refresh_returns_at_domcontentloaded(eager, site):
     assert eager.execute_script("return document.readyState") == "interactive"
 
 
+@pytest.mark.wall_clock
 @pytest.mark.e2e
 def test_none_get_returns_once_the_navigation_has_started(none, site):
     none.get(site)
@@ -137,6 +138,7 @@ def test_none_get_returns_once_the_navigation_has_started(none, site):
     assert _wait_for(none, "return document.title", "slow page") == "slow page"
 
 
+@pytest.mark.wall_clock
 @pytest.mark.e2e
 def test_none_refresh_returns_once_the_reload_has_started(none, site):
     none.get(site + "slow")
@@ -147,6 +149,7 @@ def test_none_refresh_returns_once_the_reload_has_started(none, site):
     assert took < SLOW_DOCUMENT_S - 1, took
 
 
+@pytest.mark.wall_clock
 @pytest.mark.e2e
 def test_none_click_does_not_wait_for_the_page_it_unloads_into(none, site):
     none.get(site)

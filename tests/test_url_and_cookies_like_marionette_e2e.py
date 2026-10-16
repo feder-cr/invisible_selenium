@@ -88,6 +88,7 @@ def page(driver, site):
 
 
 # ── current_url ─────────────────────────────────────────────────────────────
+@pytest.mark.wall_clock
 def test_the_current_url_answers_while_the_page_is_busy(page, site):
     # The page sends a beacon and holds its thread for 6 s in the same task,
     # so once the server has the beacon the page is busy, and the url is

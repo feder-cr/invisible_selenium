@@ -95,6 +95,7 @@ def test_a_file_input_is_not_clicked(page):
         page.find_element(By.ID, "file").click()
 
 
+@pytest.mark.wall_clock
 def test_a_covered_element_is_refused_at_once(page):
     button = page.find_element(By.ID, "covered")
     began = time.monotonic()
@@ -116,6 +117,7 @@ def test_an_element_without_pointer_events_is_refused_and_says_why(page):
         page.find_element(By.ID, "nopointer").click()
 
 
+@pytest.mark.wall_clock
 def test_a_disabled_button_is_clicked_without_an_error(page):
     """Marionette's click has no enabled check: the press goes out, and a
     disabled button does what a disabled button does with it, nothing."""
@@ -154,6 +156,7 @@ def test_clicking_an_option_chooses_it_and_a_disabled_one_is_left(page):
     ("ro", r'Element is read-only: <input id="ro">'),
     ("plain", r'Unable to clear element that cannot be edited: <div id="plain">'),
 ])
+@pytest.mark.wall_clock
 def test_clear_refuses_at_once_what_cannot_be_cleared(page, element_id, message):
     element = page.find_element(By.ID, element_id)
     began = time.monotonic()
