@@ -102,6 +102,7 @@ def page(driver, site):
 
 
 # ── timeouts ────────────────────────────────────────────────────────────────
+@pytest.mark.wall_clock
 def test_a_page_load_timeout_of_zero_times_out_at_once(page, site):
     page.set_page_load_timeout(0)
     began = time.monotonic()
@@ -153,6 +154,7 @@ def test_the_implicit_wait_looks_every_ten_milliseconds(page, monkeypatch):
 
 
 # ── history ─────────────────────────────────────────────────────────────────
+@pytest.mark.wall_clock
 def test_back_and_forward_on_a_hash_end_at_once(page, site):
     page.find_element(By.ID, "hash").click()
     assert page.current_url == site + "#a"

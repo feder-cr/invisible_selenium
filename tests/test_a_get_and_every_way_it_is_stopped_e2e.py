@@ -141,6 +141,7 @@ def driver(firefox_binary):
     d.quit()
 
 
+@pytest.mark.wall_clock
 @pytest.mark.parametrize("kind", list(ACT))
 def test_a_get_stopped_on_its_way_answers_as_geckodriver(driver, server, kind):
     same = "http://127.0.0.1:%d" % server

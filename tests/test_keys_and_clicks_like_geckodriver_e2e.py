@@ -119,6 +119,7 @@ def test_a_click_that_unloads_the_page_waits_for_the_new_one(driver, site):
     assert driver.find_element(By.TAG_NAME, "body").text == "arrived"
 
 
+@pytest.mark.wall_clock
 def test_a_click_that_unloads_nothing_returns_at_once(driver, site):
     driver.get(site)
     button = driver.find_element(By.ID, "noop")

@@ -123,6 +123,7 @@ def _dismissed(d, kind="alert"):
 
 
 # ── c. a dialog inside a script ─────────────────────────────────────────────
+@pytest.mark.wall_clock
 def test_a_script_that_alerts_answers_none_at_once(page):
     began = time.monotonic()
     assert page.execute_script("alert('hi'); return 5") is None
@@ -135,6 +136,7 @@ def test_a_script_that_alerts_answers_none_at_once(page):
         page.switch_to.alert
 
 
+@pytest.mark.wall_clock
 def test_an_asynchronous_script_ends_when_a_dialog_opens(page):
     page.execute_script("setTimeout(() => alert('later'), 300)")
     began = time.monotonic()
@@ -187,6 +189,7 @@ def test_the_dialog_is_named_by_its_type(page, kind):
         page.title
 
 
+@pytest.mark.wall_clock
 def test_a_dialog_during_an_implicit_wait_ends_the_find(page):
     page.implicitly_wait(5)
     page.execute_script("setTimeout(() => alert('mid'), 500)")
@@ -199,6 +202,7 @@ def test_a_dialog_during_an_implicit_wait_ends_the_find(page):
 
 
 # ── d. a dialog while the page loads ────────────────────────────────────────
+@pytest.mark.wall_clock
 def test_a_page_that_alerts_while_it_loads_ends_the_wait(page, site):
     page.set_page_load_timeout(10)
     began = time.monotonic()
@@ -210,6 +214,7 @@ def test_a_page_that_alerts_while_it_loads_ends_the_wait(page, site):
 
 
 # ── e. beforeunload ─────────────────────────────────────────────────────────
+@pytest.mark.wall_clock
 def test_beforeunload_is_accepted_and_the_navigation_goes_on(page, site):
     page.get(site + "bu")
     page.find_element(By.ID, "i").click()  # sticky activation, which it needs
