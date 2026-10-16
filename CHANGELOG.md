@@ -4,7 +4,7 @@
 
 ## [0.6.1] - 2026-10-16
 
-The pin moves to invisible-core 48.42.0, still on the firefox-48 engine.
+The pin moves to invisible-core 48.43.0, still on the firefox-48 engine.
 
 ### Fixed
 - **The e2e tests that measure time run alone.** Sixteen of them assert an upper
