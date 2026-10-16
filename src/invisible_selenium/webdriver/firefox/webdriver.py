@@ -14,12 +14,12 @@ work unchanged, and adds invisible_playwright's keyword arguments after them.
 """
 from __future__ import annotations
 
-import secrets
 import time
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from invisible_core import record_session_seed, resolve_session_seed
 from invisible_core import configure_proxy as _configure_proxy_shared
 from invisible_core import SessionLocale, persona_cookies, prepare_session_geo
 from invisible_core._fpforge import Profile, generate_profile
@@ -115,7 +115,9 @@ class WebDriver(_session.CommonLaunch, RemoteWebDriver):
         # Everything below mirrors invisible_playwright's `launcher.py`
         # `__init__`, whose comments say why each field exists.
         # `zoom.stealth.fpp.hw_seed` is int32_t, so the seed stays in int31.
-        self.seed: int = int(seed) if seed is not None else secrets.randbits(31)
+        # One place decides the seed, and a profile directory remembers it
+        # (invisible_core.resolve_session_seed, B314).
+        self.seed: int = resolve_session_seed(seed, profile_dir)
         self._pin = pin
         self._headless = headless
         self._proxy = proxy
@@ -178,6 +180,8 @@ class WebDriver(_session.CommonLaunch, RemoteWebDriver):
 
         if self._profile_dir is not None:
             self._profile_dir.mkdir(parents=True, exist_ok=True)
+            # The profile is this machine from now on (B314).
+            record_session_seed(self._profile_dir, self.seed)
         browser = launch_engine(
             str(executable), prefs=prefs,
             profile_dir=str(self._profile_dir) if self._profile_dir else None,
