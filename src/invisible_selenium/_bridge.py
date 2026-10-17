@@ -8,10 +8,11 @@ back, and how an engine failure becomes the exception Selenium documents.
 ⛔ WHERE THINGS RUN. Every DOM read and every query below runs in the UTILITY
 world (`__ctx_aux__`), which sees the page's DOM through an Xray: the methods
 it calls are the NATIVE ones, not whatever the site may have replaced, and no
-read is accountable to a wrapped accessor. Only `execute_script` crosses into
-the page's own world, because running code as the page is what the caller
-asked for - and even there the result is read back from the privileged side,
-never by running a serializer the page can observe.
+read is accountable to a wrapped accessor. Only `execute_script` runs
+outside it, in the CALLER's world, because it runs the caller's code: there the
+page's own additions are visible and the standard APIs are still the native
+ones ([B322]) - and even there the result is read back from the privileged
+side, never by running a serializer the page can observe.
 """
 from __future__ import annotations
 
@@ -282,14 +283,14 @@ _ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 
 
 class Marshal:
-    """Arguments into the page's world, and a result back out of it."""
+    """Arguments into the caller's world, and a result back out of it."""
 
     def __init__(self, driver, page, frame_id: str) -> None:
         self.driver = driver
         self.page = page
         self.frame_id = frame_id
         self.inj = page.injected
-        self.ctx = self.inj.main_context(frame_id)
+        self.ctx = self.inj.caller_context(frame_id)
         self._owned: List[str] = []
 
     # arguments ────────────────────────────────────────────────────────────
@@ -299,7 +300,7 @@ class Marshal:
                 "The element belongs to another window or frame than the one "
                 "the script runs in")
         element._check_alive()
-        oid = self.inj.node_to_main(self.frame_id, element._oid)
+        oid = self.inj.node_to_caller(self.frame_id, element._oid)
         if not oid:
             raise exc.StaleElementReferenceException(
                 "The element could not be passed to the page")

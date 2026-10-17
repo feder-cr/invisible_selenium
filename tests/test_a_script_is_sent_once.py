@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 from invisible_core.juggler.connection import EventListeners, ProtocolError
-from invisible_core.juggler.injected import InjectedScript
+from invisible_core.juggler.injected import CALLER_WORLD, InjectedScript
 from invisible_selenium import _bridge
 from invisible_selenium.common import exceptions as exc
 from invisible_selenium.webdriver.common.timeouts import Timeouts
@@ -70,7 +70,8 @@ class _Transport(EventListeners):
     def world(self, context):
         self.dispatch_event("Runtime.executionContextCreated",
                             {"executionContextId": context,
-                             "auxData": {"frameId": "F"}}, "S")
+                             # the caller's world, where execute_script runs [B322]
+                             "auxData": {"frameId": "F", "name": CALLER_WORLD}}, "S")
 
 
 class _Page:

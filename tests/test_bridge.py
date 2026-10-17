@@ -138,7 +138,7 @@ class _FakeInjected:
         self.props = props
         self.released = []
 
-    def main_context(self, frame_id):
+    def caller_context(self, frame_id):
         return "ctx"
 
     def properties(self, ctx, oid):
